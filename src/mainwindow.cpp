@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "novdecoder.h"
+#include "chapterdownload.h"
+#include "bookdownloadwidget.h"
 
 #include <QComboBox>
 #include <QDir>
@@ -10,37 +12,30 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QStandardPaths>
-#include <QTemporaryFile>
+#include <QTabWidget>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
 
-namespace {
-
-bool isDownloadUrl(const QUrl &url)
-{
-    return url.isValid() && !url.isRelative() && !url.host().isEmpty()
-        && (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https"))
-        && url.userInfo().isEmpty();
-}
-
-}
-
 MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
 {
     setWindowTitle(QStringLiteral("NOV 下载与解码工具"));
-    resize(760, 430);
-    setMinimumWidth(580);
+    resize(1100, 820);
+    setMinimumSize(820, 680);
 
-    auto *layout = new QVBoxLayout(this);
+    auto *outer = new QVBoxLayout(this);
+    tabs = new QTabWidget(this);
+    auto *singlePage = new QWidget(tabs);
+    tabs->addTab(singlePage, QStringLiteral("单章转换"));
+    bookWidget = new BookDownloadWidget(tabs);
+    tabs->addTab(bookWidget, QStringLiteral("整书下载"));
+    outer->addWidget(tabs);
+    auto *layout = new QVBoxLayout(singlePage);
     layout->setContentsMargins(24, 24, 24, 24);
     layout->setSpacing(16);
 
@@ -134,7 +129,30 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
     notice->setWordWrap(true);
     layout->addWidget(notice);
 
-    networkManager = new QNetworkAccessManager(this);
+    downloader = new ChapterDownload(this);
+    connect(downloader, &ChapterDownload::progress, this, [this](qint64 received, qint64 total) {
+        downloadProgress->setRange(0, total > 0 ? 100 : 0);
+        if (total > 0)
+            downloadProgress->setValue(static_cast<int>(received * 100 / total));
+        statusLabel->setText(QStringLiteral("正在下载：%1 KiB%2")
+                                 .arg(received / 1024)
+                                 .arg(total > 0 ? QStringLiteral(" / %1 KiB").arg(total / 1024) : QString()));
+    });
+    connect(downloader, &ChapterDownload::finished, this,
+            [this](bool success, const QString &message, qint64 bytes, qsizetype characters) {
+        cancelButton->setVisible(false);
+        downloadProgress->setVisible(false);
+        pathsWidget->setEnabled(true);
+        tabs->setTabEnabled(1, true);
+        if (success)
+            reportSaved(outputPathEdit->text(), bytes, characters);
+        else
+            statusLabel->setText(QStringLiteral("未保存：%1").arg(message));
+        updateAction();
+    });
+    connect(bookWidget, &BookDownloadWidget::busyChanged, this, [this](bool busy) {
+        tabs->setTabEnabled(0, !busy);
+    });
     connect(inputButton, &QPushButton::clicked, this, &MainWindow::chooseInput);
     connect(outputButton, &QPushButton::clicked, this, &MainWindow::chooseOutput);
     connect(inputMode, &QComboBox::currentIndexChanged, this,
@@ -153,20 +171,12 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
     connect(keyEdit, &QLineEdit::textChanged, this, &MainWindow::updateAction);
     connect(decodeButton, &QPushButton::clicked, this, &MainWindow::decodeAndSave);
     connect(cancelButton, &QPushButton::clicked, this, [this] {
-        if (downloadReply) {
-            cancelButton->setEnabled(false);
-            failDownload(QStringLiteral("已取消下载，未写入 TXT 文件。"));
-        }
+        cancelButton->setEnabled(false);
+        downloader->cancel();
     });
 }
 
-MainWindow::~MainWindow()
-{
-    if (downloadReply) {
-        downloadReply->disconnect(this);
-        downloadReply->abort();
-    }
-}
+MainWindow::~MainWindow() = default;
 
 void MainWindow::chooseInput()
 {
@@ -190,7 +200,7 @@ void MainWindow::updatePaths()
 {
     if (inputMode->currentIndex() == 1) {
         const QUrl url(downloadUrlEdit->text().trimmed(), QUrl::StrictMode);
-        if (!isDownloadUrl(url)) {
+        if (!ChapterDownload::isDownloadUrl(url)) {
             outputPathEdit->clear();
         } else {
             auto name = QFileInfo(url.fileName()).completeBaseName().left(120);
@@ -221,14 +231,14 @@ void MainWindow::updatePaths()
 void MainWindow::updateAction()
 {
     const bool hasInput = inputMode->currentIndex() == 1
-        ? isDownloadUrl(QUrl(downloadUrlEdit->text().trimmed(), QUrl::StrictMode))
+        ? ChapterDownload::isDownloadUrl(QUrl(downloadUrlEdit->text().trimmed(), QUrl::StrictMode))
         : !inputPathEdit->text().isEmpty();
     const auto key = keyEdit->text();
     const bool hasKey = key.size() == 16
         && std::all_of(key.cbegin(), key.cend(), [](QChar ch) {
             return ch.unicode() >= 0x20 && ch.unicode() <= 0x7e;
         });
-    decodeButton->setEnabled(!downloadReply && hasInput && hasKey && !outputPathEdit->text().isEmpty());
+    decodeButton->setEnabled(!downloader->isBusy() && hasInput && hasKey && !outputPathEdit->text().isEmpty());
 }
 
 void MainWindow::decodeAndSave()
@@ -236,7 +246,7 @@ void MainWindow::decodeAndSave()
     const auto outputPath = outputPathEdit->text();
     const bool fromUrl = inputMode->currentIndex() == 1;
     const QUrl url(downloadUrlEdit->text().trimmed(), QUrl::StrictMode);
-    if (fromUrl && !isDownloadUrl(url)) {
+    if (fromUrl && !ChapterDownload::isDownloadUrl(url)) {
         statusLabel->setText(QStringLiteral("请输入完整的 HTTP(S) 下载链接，不支持包含账号密码的链接。"));
         return;
     }
@@ -268,138 +278,25 @@ void MainWindow::convertAndReport(const QString &inputPath, const QString &outpu
         statusLabel->setText(QStringLiteral("未保存：%1").arg(result.error));
         return;
     }
+    reportSaved(outputPath, result.bytesWritten, result.characters);
+}
+
+void MainWindow::reportSaved(const QString &outputPath, qint64 bytes, qsizetype characters)
+{
     statusLabel->setText(QStringLiteral("已保存：%1\nUTF-8 · %2 字节 · %3 个字符（含换行与标点）。")
                              .arg(QDir::toNativeSeparators(QFileInfo(outputPath).absoluteFilePath()))
-                             .arg(result.bytesWritten)
-                             .arg(result.characters));
+                             .arg(bytes).arg(characters));
 }
 
 void MainWindow::startDownload(const QUrl &url, const QString &outputPath, bool allowOverwrite)
 {
-    downloadFile = new QTemporaryFile(QDir::temp().filePath(QStringLiteral("NovDecoder-XXXXXX.nov")), this);
-    if (!downloadFile->open()) {
-        statusLabel->setText(QStringLiteral("未保存：无法创建下载临时文件：%1").arg(downloadFile->errorString()));
-        delete downloadFile;
-        downloadFile = nullptr;
-        return;
-    }
-
-    QNetworkRequest request(url);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::UserVerifiedRedirectPolicy);
-    request.setMaximumRedirectsAllowed(5);
-    request.setTransferTimeout(30000);
-    downloadError.clear();
-    downloadReply = networkManager->get(request);
-    downloadReply->setReadBufferSize(64 * 1024);
     pathsWidget->setEnabled(false);
+    tabs->setTabEnabled(1, false);
     decodeButton->setEnabled(false);
     cancelButton->setEnabled(true);
     cancelButton->setVisible(true);
     downloadProgress->setRange(0, 0);
     downloadProgress->setVisible(true);
     statusLabel->setText(QStringLiteral("正在下载章节资源…"));
-
-    connect(downloadReply, &QNetworkReply::redirected, this,
-            [this, previousUrl = url](const QUrl &redirectUrl) mutable {
-        const auto target = previousUrl.resolved(redirectUrl);
-        if (!isDownloadUrl(target)
-            || (previousUrl.scheme() == QStringLiteral("https")
-                && target.scheme() != QStringLiteral("https"))) {
-            failDownload(QStringLiteral("已拒绝不安全的重定向，未写入 TXT 文件。"));
-            return;
-        }
-        previousUrl = target;
-        downloadReply->redirectAllowed();
-    });
-    connect(downloadReply, &QNetworkReply::metaDataChanged, this, [this] {
-        if (downloadReply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > NovDecoder::MaxFileSize)
-            failDownload(QStringLiteral("下载文件超过 32 MiB 限制，已取消下载。"));
-    });
-    connect(downloadReply, &QIODevice::readyRead, this, &MainWindow::readDownloadData);
-    connect(downloadReply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
-        if (!downloadError.isEmpty())
-            return;
-        if (received > NovDecoder::MaxFileSize || total > NovDecoder::MaxFileSize) {
-            failDownload(QStringLiteral("下载文件超过 32 MiB 限制，已取消下载。"));
-            return;
-        }
-        if (total > 0) {
-            downloadProgress->setRange(0, 100);
-            downloadProgress->setValue(static_cast<int>(received * 100 / total));
-        } else {
-            downloadProgress->setRange(0, 0);
-        }
-        statusLabel->setText(QStringLiteral("正在下载：%1 KiB%2")
-                                 .arg(received / 1024)
-                                 .arg(total > 0 ? QStringLiteral(" / %1 KiB").arg(total / 1024) : QString()));
-    });
-    connect(downloadReply, &QNetworkReply::finished, this, [this, outputPath, allowOverwrite] {
-        finishDownload(outputPath, allowOverwrite);
-    });
-}
-
-void MainWindow::readDownloadData()
-{
-    if (!downloadError.isEmpty())
-        return;
-    const bool isFileResponse = downloadReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200;
-    while (downloadReply->bytesAvailable() > 0) {
-        const auto data = downloadReply->read(64 * 1024);
-        if (data.isEmpty())
-            break;
-        if (!isFileResponse)
-            continue;
-        if (downloadFile->size() + data.size() > NovDecoder::MaxFileSize) {
-            failDownload(QStringLiteral("下载文件超过 32 MiB 限制，已取消下载。"));
-            return;
-        }
-        if (downloadFile->write(data) != data.size()) {
-            failDownload(QStringLiteral("无法写入下载临时文件：%1").arg(downloadFile->errorString()));
-            return;
-        }
-    }
-}
-
-void MainWindow::failDownload(const QString &error)
-{
-    if (!downloadError.isEmpty())
-        return;
-    downloadError = error;
-    if (!downloadReply->isFinished())
-        downloadReply->abort();
-}
-
-void MainWindow::finishDownload(const QString &outputPath, bool allowOverwrite)
-{
-    if (downloadError.isEmpty()) {
-        const auto status = downloadReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (status >= 400) {
-            downloadError = QStringLiteral("下载失败（HTTP %1）。签名链接可能已过期或无权访问，请重新获取有效链接。")
-                                .arg(status);
-        } else if (downloadReply->error() != QNetworkReply::NoError) {
-            downloadError = QStringLiteral("下载失败（网络错误 %1）。请检查网络和链接；HTTPS 连接还需有效证书。")
-                                .arg(static_cast<int>(downloadReply->error()));
-        } else if (status != 200) {
-            downloadError = QStringLiteral("服务器未返回完整文件（HTTP %1），未转换 TXT。").arg(status);
-        } else {
-            readDownloadData();
-        }
-    }
-    if (downloadError.isEmpty() && !downloadFile->flush())
-        downloadError = QStringLiteral("无法保存下载临时文件：%1").arg(downloadFile->errorString());
-
-    const auto inputPath = downloadFile->fileName();
-    downloadFile->close();
-    downloadReply->deleteLater();
-    downloadReply = nullptr;
-    cancelButton->setVisible(false);
-    downloadProgress->setVisible(false);
-    if (downloadError.isEmpty())
-        convertAndReport(inputPath, outputPath, allowOverwrite);
-    else
-        statusLabel->setText(QStringLiteral("未保存：%1").arg(downloadError));
-    delete downloadFile;
-    downloadFile = nullptr;
-    pathsWidget->setEnabled(true);
-    updateAction();
+    downloader->start(url, outputPath, keyEdit->text().toLatin1(), allowOverwrite);
 }

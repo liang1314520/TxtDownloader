@@ -5,11 +5,11 @@
 class QComboBox;
 class QLabel;
 class QLineEdit;
-class QNetworkAccessManager;
-class QNetworkReply;
+class ChapterDownload;
+class BookDownloadWidget;
+class QTabWidget;
 class QProgressBar;
 class QPushButton;
-class QTemporaryFile;
 class QUrl;
 
 class MainWindow : public QWidget {
@@ -27,10 +27,10 @@ private:
     void decodeAndSave();
     void convertAndReport(const QString &inputPath, const QString &outputPath, bool allowOverwrite);
     void startDownload(const QUrl &url, const QString &outputPath, bool allowOverwrite);
-    void readDownloadData();
-    void failDownload(const QString &error);
-    void finishDownload(const QString &outputPath, bool allowOverwrite);
+    void reportSaved(const QString &outputPath, qint64 bytes, qsizetype characters);
 
+    QTabWidget *tabs = nullptr;
+    BookDownloadWidget *bookWidget = nullptr;
     QWidget *pathsWidget = nullptr;
     QComboBox *inputMode = nullptr;
     QLineEdit *inputPathEdit = nullptr;
@@ -41,8 +41,5 @@ private:
     QPushButton *cancelButton = nullptr;
     QProgressBar *downloadProgress = nullptr;
     QLabel *statusLabel = nullptr;
-    QNetworkAccessManager *networkManager = nullptr;
-    QNetworkReply *downloadReply = nullptr;
-    QTemporaryFile *downloadFile = nullptr;
-    QString downloadError;
+    ChapterDownload *downloader = nullptr;
 };

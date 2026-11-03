@@ -1,7 +1,5 @@
 #include "novdecoder.h"
-
-#include <windows.h>
-#include <bcrypt.h>
+#include "aesecb.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -9,23 +7,6 @@
 #include <QStringDecoder>
 
 #include <algorithm>
-
-namespace {
-
-struct AesHandles {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_KEY_HANDLE key = nullptr;
-
-    ~AesHandles()
-    {
-        if (key)
-            BCryptDestroyKey(key);
-        if (algorithm)
-            BCryptCloseAlgorithmProvider(algorithm, 0);
-    }
-};
-
-}
 
 namespace NovDecoder {
 
@@ -40,34 +21,10 @@ DecodeResult decode(const QByteArray &encrypted, QByteArray key)
     if (encrypted.size() % 16 != 0)
         return {{}, QStringLiteral("文件长度不是 16 字节的整数倍，可能未下载完整或不是受支持的章节文件。"), 0};
 
-    AesHandles aes;
-    auto status = BCryptOpenAlgorithmProvider(&aes.algorithm, BCRYPT_AES_ALGORITHM, nullptr, 0);
-    if (status < 0)
-        return {{}, QStringLiteral("无法初始化 Windows AES 服务。"), 0};
-
-    status = BCryptSetProperty(aes.algorithm, BCRYPT_CHAINING_MODE,
-                              reinterpret_cast<PUCHAR>(const_cast<wchar_t *>(BCRYPT_CHAIN_MODE_ECB)),
-                              sizeof(BCRYPT_CHAIN_MODE_ECB), 0);
-    if (status < 0)
-        return {{}, QStringLiteral("无法设置 AES-ECB 模式。"), 0};
-
-    status = BCryptGenerateSymmetricKey(aes.algorithm, &aes.key, nullptr, 0,
-                                        reinterpret_cast<PUCHAR>(key.data()),
-                                        static_cast<ULONG>(key.size()), 0);
-    SecureZeroMemory(key.data(), static_cast<SIZE_T>(key.size()));
-    if (status < 0)
-        return {{}, QStringLiteral("无法创建章节解码密钥。"), 0};
-
-    QByteArray plaintext(encrypted.size(), Qt::Uninitialized);
-    ULONG bytesWritten = 0;
-    status = BCryptDecrypt(aes.key,
-                           reinterpret_cast<PUCHAR>(const_cast<char *>(encrypted.constData())),
-                           static_cast<ULONG>(encrypted.size()), nullptr, nullptr, 0,
-                           reinterpret_cast<PUCHAR>(plaintext.data()),
-                           static_cast<ULONG>(plaintext.size()), &bytesWritten, BCRYPT_BLOCK_PADDING);
-    if (status < 0)
-        return {{}, QStringLiteral("解码或填充校验失败。文件可能损坏、格式不支持，或并非当前版本的章节资源。"), 0};
-    plaintext.resize(bytesWritten);
+    const auto decrypted = AesEcb::decrypt(encrypted, std::move(key));
+    if (!decrypted.ok())
+        return {{}, decrypted.error, 0};
+    const auto &plaintext = decrypted.bytes;
     if (plaintext.isEmpty())
         return {{}, QStringLiteral("解码结果为空，没有正文内容。"), 0};
 
@@ -91,8 +48,8 @@ SaveResult convertFile(const QString &inputPath, const QString &outputPath,
     const QFileInfo outputInfo(outputPath);
     if (!inputInfo.isFile())
         return {QStringLiteral("输入文件不存在或不是普通文件。"), 0, 0};
-    if (outputInfo.isSymLink())
-        return {QStringLiteral("输出位置不能是符号链接或快捷方式，请另选一个 TXT 路径。"), 0, 0};
+    if (outputInfo.isSymLink() || outputInfo.isJunction())
+        return {QStringLiteral("输出位置不能是符号链接、目录联接或快捷方式，请另选 TXT 路径。"), 0, 0};
     if (inputInfo.absoluteFilePath().compare(outputInfo.absoluteFilePath(), Qt::CaseInsensitive) == 0
         || (outputInfo.exists()
             && inputInfo.canonicalFilePath().compare(outputInfo.canonicalFilePath(),
@@ -122,8 +79,10 @@ SaveResult convertFile(const QString &inputPath, const QString &outputPath,
         return {QStringLiteral("无法创建 TXT 文件：%1").arg(output.errorString()), 0, 0};
     if (output.write(result.utf8) != result.utf8.size())
         return {QStringLiteral("写入 TXT 失败：%1").arg(output.errorString()), 0, 0};
-    if (!allowOverwrite && QFileInfo::exists(outputPath))
-        return {QStringLiteral("保存期间出现同名文件，已取消保存以避免覆盖。"), 0, 0};
+    const QFileInfo finalOutput(outputPath);
+    if (finalOutput.isSymLink() || finalOutput.isJunction()
+        || (!allowOverwrite && finalOutput.exists()))
+        return {QStringLiteral("保存期间出现同名文件或不安全链接，已取消保存。"), 0, 0};
     if (!output.commit())
         return {QStringLiteral("保存 TXT 失败：%1").arg(output.errorString()), 0, 0};
     return {{}, result.utf8.size(), result.characters};

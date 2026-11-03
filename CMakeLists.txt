@@ -18,13 +18,30 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-add_library(novdecoder_core STATIC src/novdecoder.cpp src/novdecoder.h)
+add_library(novdecoder_core STATIC
+    src/novdecoder.cpp src/novdecoder.h
+    src/aesecb.cpp src/aesecb.h)
 target_include_directories(novdecoder_core PUBLIC src)
 target_compile_definitions(novdecoder_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(novdecoder_core PUBLIC Qt6::Core PRIVATE bcrypt)
 
-qt_add_executable(NovDecoder WIN32 src/main.cpp src/mainwindow.cpp src/mainwindow.h)
-target_link_libraries(NovDecoder PRIVATE novdecoder_core Qt6::Widgets Qt6::Network)
+add_library(novdecoder_network STATIC
+    src/chapterdownload.cpp src/chapterdownload.h
+    src/novelapi.cpp src/novelapi.h
+    src/localkeyprofile.cpp src/localkeyprofile.h
+    src/bookdownloadcontroller.cpp src/bookdownloadcontroller.h)
+target_include_directories(novdecoder_network PUBLIC src)
+target_compile_definitions(novdecoder_network PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(novdecoder_network PUBLIC novdecoder_core Qt6::Network PRIVATE crypt32)
+
+add_library(novdecoder_widgets STATIC
+    src/mainwindow.cpp src/mainwindow.h
+    src/bookdownloadwidget.cpp src/bookdownloadwidget.h)
+target_include_directories(novdecoder_widgets PUBLIC src)
+target_link_libraries(novdecoder_widgets PUBLIC novdecoder_network Qt6::Widgets)
+
+qt_add_executable(NovDecoder WIN32 src/main.cpp)
+target_link_libraries(NovDecoder PRIVATE novdecoder_widgets)
 install(TARGETS NovDecoder RUNTIME DESTINATION .)
 
 include(CTest)
@@ -34,7 +51,7 @@ if(BUILD_TESTING)
     target_link_libraries(tst_novdecoder PRIVATE novdecoder_core Qt6::Test)
     add_test(NAME novdecoder COMMAND tst_novdecoder -o -,txt)
 
-    qt_add_executable(tst_mainwindow tests/tst_mainwindow.cpp src/mainwindow.cpp src/mainwindow.h)
-    target_link_libraries(tst_mainwindow PRIVATE novdecoder_core Qt6::Widgets Qt6::Network Qt6::Test)
+    qt_add_executable(tst_mainwindow tests/tst_mainwindow.cpp)
+    target_link_libraries(tst_mainwindow PRIVATE novdecoder_widgets Qt6::Test)
     add_test(NAME mainwindow COMMAND tst_mainwindow -o -,txt)
 endif()
