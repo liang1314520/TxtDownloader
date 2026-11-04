@@ -59,6 +59,11 @@ bool NovelApi::isId(const QString &id)
     return expression.match(id).hasMatch();
 }
 
+bool NovelApi::isSearchKeywords(const QString &keywords)
+{
+    return boundedText(keywords, 256) && !keywords.trimmed().isEmpty();
+}
+
 void NovelApi::clearSession()
 {
     cancel();
@@ -89,8 +94,9 @@ QString NovelApi::importSession(const QString &capturePath)
         return QStringLiteral("请选择包含 HTTP 请求头和原始 Body 的 .hcy 请求抓包。");
     const auto lines = raw.first(separator).split('\n');
     const auto requestLine = lines.first().trimmed();
-    if (requestLine != "POST /v1/xs/xq HTTP/1.1" && requestLine != "POST /v1/xs/zjxq HTTP/1.1")
-        return QStringLiteral("仅支持本应用书籍详情或章节详情的 POST 请求抓包。");
+    if (requestLine != "POST /v1/xs/xq HTTP/1.1" && requestLine != "POST /v1/xs/zjxq HTTP/1.1"
+        && requestLine != "POST /v1/xs/ss HTTP/1.1")
+        return QStringLiteral("仅支持本应用小说搜索、书籍详情或章节详情的 POST 请求抓包。");
     QMap<QByteArray, QByteArray> headers;
     for (qsizetype i = 1; i < lines.size(); ++i) {
         const auto line = lines[i].trimmed();
@@ -160,9 +166,29 @@ void NovelApi::prepare(RequestKind kind, const QString &id)
         return;
     }
     requestedId = id.toLower();
+    enqueue(kind, QJsonObject{{QStringLiteral("id"), requestedId}});
+}
+
+void NovelApi::searchBooks(const QString &keywords, int page)
+{
+    if (active)
+        return;
+    if (!hasSession() || !isSearchKeywords(keywords) || page < 1 || page > 10000) {
+        emit failed(QStringLiteral("请先导入有效会话，填写 1–256 字符的搜索关键词，页码须在 1–10000 之间。"));
+        return;
+    }
+    requestedPage = page;
+    enqueue(RequestKind::Search, QJsonObject{
+        {QStringLiteral("keywords"), keywords.trimmed()},
+        {QStringLiteral("position"), QStringLiteral("novel")},
+        {QStringLiteral("page"), QString::number(page)}});
+}
+
+void NovelApi::enqueue(RequestKind kind, const QJsonObject &data)
+{
     requestKind = kind;
     const QJsonObject object{
-        {QStringLiteral("data"), QJsonObject{{QStringLiteral("id"), requestedId}}},
+        {QStringLiteral("data"), data},
         {QStringLiteral("deviceId"), deviceId}, {QStringLiteral("token"), token}};
     const auto encrypted = AesEcb::encrypt(QJsonDocument(object).toJson(QJsonDocument::Compact), apiKey);
     if (!encrypted.ok()) {
@@ -179,7 +205,18 @@ void NovelApi::prepare(RequestKind kind, const QString &id)
 
 void NovelApi::send()
 {
-    const auto path = requestKind == RequestKind::Book ? QStringLiteral("/v1/xs/xq") : QStringLiteral("/v1/xs/zjxq");
+    QString path;
+    switch (requestKind) {
+    case RequestKind::Book:
+        path = QStringLiteral("/v1/xs/xq");
+        break;
+    case RequestKind::Chapter:
+        path = QStringLiteral("/v1/xs/zjxq");
+        break;
+    case RequestKind::Search:
+        path = QStringLiteral("/v1/xs/ss");
+        break;
+    }
     QNetworkRequest request(QUrl(QStringLiteral("http://yj.kkj234ls.com") + path));
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     request.setTransferTimeout(30000);
@@ -286,6 +323,43 @@ QString NovelApi::parseBook(const QJsonObject &data, NovelBook &book) const
     return {};
 }
 
+QString NovelApi::parseSearch(const QJsonArray &data, QVector<NovelSearchBook> &books) const
+{
+    if (data.size() > 10000)
+        return QStringLiteral("单页搜索结果超过 10000 条限制，已停止。");
+    QSet<QString> ids;
+    for (const auto &entry : data) {
+        if (!entry.isObject())
+            return QStringLiteral("搜索结果包含无效记录。");
+        const auto object = entry.toObject();
+        if (!object.value(QStringLiteral("type")).isString())
+            return QStringLiteral("搜索结果缺少有效的内容类型。");
+        if (object.value(QStringLiteral("type")).toString() != QStringLiteral("novel"))
+            continue;
+        NovelSearchBook book;
+        book.id = object.value(QStringLiteral("id")).toString().toLower();
+        book.name = object.value(QStringLiteral("name")).toString();
+        if (!isId(book.id) || !boundedText(book.name, 256))
+            return QStringLiteral("搜索结果包含无效书籍 ID 或书名。");
+        const auto author = object.value(QStringLiteral("author"));
+        const auto count = object.value(QStringLiteral("chapter_count"));
+        const auto status = object.value(QStringLiteral("status_text"));
+        for (const auto &field : {author, count, status}) {
+            if (!field.isUndefined() && !field.isNull()
+                && (!field.isString() || (!field.toString().isEmpty() && !boundedText(field.toString(), 256))))
+                return QStringLiteral("搜索结果的作者、章节数或状态字段不符合预期。");
+        }
+        book.author = author.toString();
+        book.chapterCount = count.toString();
+        book.status = status.toString();
+        if (!ids.contains(book.id)) {
+            ids.insert(book.id);
+            books.append(book);
+        }
+    }
+    return {};
+}
+
 void NovelApi::finish()
 {
     deadline.stop();
@@ -326,6 +400,20 @@ void NovelApi::finish()
         emit failed(errorCode == 2002
                         ? QStringLiteral("会话授权已过期，请在 App 中正常刷新并重新导入抓包。")
                         : QStringLiteral("接口业务错误（code %1 / errorCode %2），已停止。").arg(code).arg(errorCode));
+        return;
+    }
+    if (requestKind == RequestKind::Search) {
+        if (!object.value(QStringLiteral("data")).isArray()) {
+            emit failed(QStringLiteral("搜索响应缺少 data 数组。"));
+            return;
+        }
+        const auto entries = object.value(QStringLiteral("data")).toArray();
+        QVector<NovelSearchBook> books;
+        error = parseSearch(entries, books);
+        if (!error.isEmpty())
+            emit failed(error);
+        else
+            emit searchReady(books, requestedPage, !entries.isEmpty());
         return;
     }
     if (!object.value(QStringLiteral("data")).isObject()) {

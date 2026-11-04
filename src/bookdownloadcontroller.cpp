@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStringDecoder>
 #include <QTemporaryFile>
 
@@ -93,6 +94,34 @@ BookDownloadController::BookDownloadController(QObject *parent)
         updateChapter(QStringLiteral("正在下载"));
         downloader->start(content, output.absoluteFilePath(), decodeKey, false, true);
     });
+    connect(api, &NovelApi::searchReady, this,
+            [this](const QVector<NovelSearchBook> &books, int page, bool hasMore) {
+        if (mode != Mode::Search)
+            return;
+        if (page != completedSearchPage + 1) {
+            stop(QStringLiteral("搜索返回的页码与当前任务不一致，已停止。"));
+            return;
+        }
+        QSet<QString> ids;
+        for (const auto &book : foundBooks)
+            ids.insert(book.id);
+        int added = 0;
+        for (const auto &book : books) {
+            if (ids.contains(book.id))
+                continue;
+            ids.insert(book.id);
+            foundBooks.append(book);
+            ++added;
+        }
+        completedSearchPage = page;
+        moreSearchResults = hasMore && page < 10000;
+        emit searchResultsChanged();
+        const auto ending = page == 10000 && hasMore
+            ? QStringLiteral("已达 10000 页限制，不再继续加载。")
+            : hasMore ? QStringLiteral("可手动加载下一页。") : QStringLiteral("服务器已返回空页，没有更多结果。");
+        finishTask(QStringLiteral("已读取搜索第 %1 页，新增 %2 本，共 %3 本。%4")
+                       .arg(page).arg(added).arg(foundBooks.size()).arg(ending));
+    });
     connect(api, &NovelApi::failed, this, &BookDownloadController::stop);
     connect(downloader, &ChapterDownload::progress, this, &BookDownloadController::downloadProgress);
     connect(downloader, &ChapterDownload::finished, this,
@@ -138,9 +167,60 @@ void BookDownloadController::invalidate()
     if (isBusy())
         return;
     api->clearSession();
+    invalidateBook();
+    invalidateSearch();
+}
+
+void BookDownloadController::invalidateBook()
+{
+    if (isBusy())
+        return;
     currentBook = {};
     emit bookChanged(currentBook);
     emit progressChanged(0, 0);
+}
+
+void BookDownloadController::invalidateSearch()
+{
+    if (isBusy())
+        return;
+    foundBooks.clear();
+    searchKeywords.clear();
+    completedSearchPage = 0;
+    moreSearchResults = false;
+    emit searchResultsChanged();
+}
+
+void BookDownloadController::searchBooks(const QString &keywords, const QString &capturePath)
+{
+    if (isBusy())
+        return;
+    invalidateSearch();
+    if (!NovelApi::isSearchKeywords(keywords)) {
+        emit statusChanged(QStringLiteral("请输入 1–256 字符的书名或关键词，不支持控制字符。"));
+        return;
+    }
+    const auto error = api->importSession(capturePath);
+    if (!error.isEmpty()) {
+        api->clearSession();
+        emit statusChanged(error);
+        return;
+    }
+    searchKeywords = keywords.trimmed();
+    setMode(Mode::Search);
+    emit progressChanged(0, 0);
+    emit statusChanged(QStringLiteral("正在搜索书名，第 1 页…"));
+    api->searchBooks(searchKeywords, 1);
+}
+
+void BookDownloadController::loadMoreSearch()
+{
+    if (isBusy() || !moreSearchResults)
+        return;
+    setMode(Mode::Search);
+    emit progressChanged(0, 0);
+    emit statusChanged(QStringLiteral("正在加载搜索第 %1 页…").arg(completedSearchPage + 1));
+    api->searchBooks(searchKeywords, completedSearchPage + 1);
 }
 
 void BookDownloadController::fetchBook(const QString &id, const QString &capturePath)

@@ -18,8 +18,16 @@ public:
     ~BookDownloadController() override;
 
     bool isBusy() const { return mode != Mode::Idle; }
+    bool isSearching() const { return mode == Mode::Search; }
     const NovelBook &book() const { return currentBook; }
+    const QVector<NovelSearchBook> &searchResults() const { return foundBooks; }
+    int searchPage() const { return completedSearchPage; }
+    bool canLoadMoreSearch() const { return moreSearchResults; }
     void invalidate();
+    void invalidateBook();
+    void invalidateSearch();
+    void searchBooks(const QString &keywords, const QString &capturePath);
+    void loadMoreSearch();
     void fetchBook(const QString &id, const QString &capturePath);
     void fetchLinks();
     void downloadBook(const QString &id, const QString &capturePath, const QString &directory);
@@ -27,6 +35,7 @@ public:
 
 signals:
     void bookChanged(const NovelBook &book);
+    void searchResultsChanged();
     void chapterChanged(int index, const QUrl &content, const QString &status);
     void busyChanged(bool busy);
     void statusChanged(const QString &message);
@@ -34,7 +43,7 @@ signals:
     void downloadProgress(qint64 received, qint64 total);
 
 private:
-    enum class Mode { Idle, Catalog, Links, Download, Merge };
+    enum class Mode { Idle, Catalog, Links, Download, Merge, Search };
     void setMode(Mode value);
     void requestBook(const QString &id, const QString &capturePath, const QString &directory);
     void startDownload(const QString &directory);
@@ -53,6 +62,10 @@ private:
     ChapterDownload *downloader;
     QTimer next;
     NovelBook currentBook;
+    QVector<NovelSearchBook> foundBooks;
+    QString searchKeywords;
+    int completedSearchPage = 0;
+    bool moreSearchResults = false;
     Mode mode = Mode::Idle;
     int current = 0;
     int saved = 0;
