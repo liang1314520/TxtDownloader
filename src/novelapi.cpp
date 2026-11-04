@@ -23,6 +23,18 @@ bool boundedText(const QString &text, qsizetype maximum)
         && std::none_of(text.cbegin(), text.cend(), [](QChar ch) { return ch.isNull() || ch.category() == QChar::Other_Control; });
 }
 
+bool descriptionText(const QJsonValue &value)
+{
+    if (value.isUndefined() || value.isNull())
+        return true;
+    const auto text = value.toString();
+    return value.isString() && text.size() <= 65536
+        && std::none_of(text.cbegin(), text.cend(), [](QChar ch) {
+            return ch.isNull() || (ch.category() == QChar::Other_Control
+                && ch != QLatin1Char('\n') && ch != QLatin1Char('\r') && ch != QLatin1Char('\t'));
+        });
+}
+
 bool isContentUrl(const QUrl &url)
 {
     return url.isValid() && !url.isRelative() && url.scheme() == QStringLiteral("https")
@@ -173,15 +185,20 @@ void NovelApi::searchBooks(const QString &keywords, int page)
 {
     if (active)
         return;
-    if (!hasSession() || !isSearchKeywords(keywords) || page < 1 || page > 10000) {
+    if (!hasSession() || (!keywords.isEmpty() && !isSearchKeywords(keywords)) || page < 1 || page > 10000) {
         emit failed(QStringLiteral("请先导入有效会话，填写 1–256 字符的搜索关键词，页码须在 1–10000 之间。"));
         return;
     }
     requestedPage = page;
-    enqueue(RequestKind::Search, QJsonObject{
-        {QStringLiteral("keywords"), keywords.trimmed()},
-        {QStringLiteral("position"), QStringLiteral("novel")},
-        {QStringLiteral("page"), QString::number(page)}});
+    QJsonObject data{{QStringLiteral("page"), QString::number(page)}};
+    if (keywords.isEmpty()) {
+        data.insert(QStringLiteral("tag_id"), groupTagId());
+        data.insert(QStringLiteral("ad_code"), QStringLiteral("video_mix_vertical"));
+    } else {
+        data.insert(QStringLiteral("keywords"), keywords.trimmed());
+        data.insert(QStringLiteral("position"), QStringLiteral("novel"));
+    }
+    enqueue(RequestKind::Search, data);
 }
 
 void NovelApi::enqueue(RequestKind kind, const QJsonObject &data)
@@ -280,6 +297,10 @@ QString NovelApi::parseBook(const QJsonObject &data, NovelBook &book) const
 {
     book.id = data.value(QStringLiteral("id")).toString();
     book.name = data.value(QStringLiteral("name")).toString();
+    const auto description = data.value(QStringLiteral("description"));
+    if (!descriptionText(description))
+        return QStringLiteral("书籍简介格式不正确或超过长度限制。");
+    book.description = description.toString();
     if (book.id != requestedId || !boundedText(book.name, 256)
         || !data.value(QStringLiteral("chapter")).isArray())
         return QStringLiteral("书籍响应的 ID、名称或目录格式不正确。");
@@ -352,6 +373,10 @@ QString NovelApi::parseSearch(const QJsonArray &data, QVector<NovelSearchBook> &
         book.author = author.toString();
         book.chapterCount = count.toString();
         book.status = status.toString();
+        const auto description = object.value(QStringLiteral("description"));
+        if (!descriptionText(description))
+            return QStringLiteral("搜索结果的简介格式不正确或超过长度限制。");
+        book.description = description.toString();
         if (!ids.contains(book.id)) {
             ids.insert(book.id);
             books.append(book);

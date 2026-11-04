@@ -29,14 +29,16 @@ add_library(novdecoder_network STATIC
     src/chapterdownload.cpp src/chapterdownload.h
     src/novelapi.cpp src/novelapi.h
     src/localkeyprofile.cpp src/localkeyprofile.h
-    src/bookdownloadcontroller.cpp src/bookdownloadcontroller.h)
+    src/bookdownloadcontroller.cpp src/bookdownloadcontroller.h
+    src/booklistcache.cpp src/booklistcache.h)
 target_include_directories(novdecoder_network PUBLIC src)
 target_compile_definitions(novdecoder_network PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(novdecoder_network PUBLIC novdecoder_core Qt6::Network PRIVATE crypt32)
 
 add_library(novdecoder_widgets STATIC
     src/mainwindow.cpp src/mainwindow.h
-    src/bookdownloadwidget.cpp src/bookdownloadwidget.h)
+    src/bookdownloadwidget.cpp src/bookdownloadwidget.h
+    src/bookdetaildialog.cpp src/bookdetaildialog.h)
 target_include_directories(novdecoder_widgets PUBLIC src)
 target_link_libraries(novdecoder_widgets PUBLIC novdecoder_network Qt6::Widgets)
 

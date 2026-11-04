@@ -20,14 +20,18 @@ public:
     bool isBusy() const { return reply != nullptr; }
     void start(const QUrl &url, const QString &outputPath, const QByteArray &key,
                bool allowOverwrite = false, bool restrictToNovelCdn = false);
+    void startPreview(const QUrl &url, const QByteArray &key);
     void cancel();
     static bool isDownloadUrl(const QUrl &url);
 
 signals:
     void progress(qint64 received, qint64 total);
     void finished(bool success, const QString &message, qint64 bytes, qsizetype characters);
+    void previewReady(const QString &text);
 
 private:
+    void begin(const QUrl &url, const QString &outputPath, const QByteArray &key,
+               bool allowOverwrite, bool restrictToNovelCdn, bool preview);
     void readData();
     void fail(const QString &message);
     void complete();
@@ -40,4 +44,6 @@ private:
     QString error;
     QString expectedDirectory;
     bool overwrite = false;
+    bool previewMode = false;
+    QByteArray previewBody;
 };

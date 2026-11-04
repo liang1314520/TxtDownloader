@@ -1,5 +1,8 @@
 #include "bookdownloadwidget.h"
 #include "bookdownloadcontroller.h"
+#include "bookdetaildialog.h"
+
+#include <algorithm>
 
 #include <QApplication>
 #include <QClipboard>
@@ -15,16 +18,38 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QScrollBar>
+#include <QTimer>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QVBoxLayout>
+
+namespace {
+class ChapterCountItem : public QTableWidgetItem {
+public:
+    explicit ChapterCountItem(const QString &text) : QTableWidgetItem(text) {}
+
+    bool operator<(const QTableWidgetItem &other) const override
+    {
+        bool leftValid = false;
+        bool rightValid = false;
+        const auto left = text().toLongLong(&leftValid);
+        const auto right = other.text().toLongLong(&rightValid);
+        leftValid = leftValid && left >= 0;
+        rightValid = rightValid && right >= 0;
+        if (leftValid != rightValid)
+            return !leftValid;
+        return leftValid ? left < right : text() < other.text();
+    }
+};
+}
 
 BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     : QWidget(parent), controller(new BookDownloadController(this))
 {
     auto *layout = new QVBoxLayout(this);
     auto *notice = new QLabel(QStringLiteral(
-        "按书名搜索并选中结果自动填入 ID，或直接填写书籍 ID；下载后自动合并带标题的整本 TXT。\n"
+        "默认在指定分类内筛选书名／作者；跨分类查找请使用“全站搜索”。单击选书、双击查看简介与预览。\n"
         "自动使用本机 App 4.0.9 密钥；会话仅在内存中使用，仅处理当前会话免费可阅读的章节。"), this);
     notice->setWordWrap(true);
     layout->addWidget(notice);
@@ -38,10 +63,14 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     keywords = new QLineEdit(settings);
     keywords->setObjectName(QStringLiteral("bookSearchKeywordsEdit"));
     keywords->setMaxLength(256);
-    keywords->setPlaceholderText(QStringLiteral("输入书名或关键词，搜索后选择对应书籍"));
-    searchButton = new QPushButton(QStringLiteral("搜索书名"), settings);
+    keywords->setPlaceholderText(QStringLiteral("输入书名／作者，默认仅在当前分类中查找"));
+    searchButton = new QPushButton(QStringLiteral("分类内查找"), settings);
     searchButton->setObjectName(QStringLiteral("searchBooksButton"));
     searchButton->setAutoDefault(false);
+    globalSearchButton = new QPushButton(QStringLiteral("全站搜索"), settings);
+    globalSearchButton->setObjectName(QStringLiteral("globalBookSearchButton"));
+    globalSearchButton->setToolTip(QStringLiteral("服务器关键词搜索，不限定分类；结果不代表属于当前分类。"));
+    globalSearchButton->setAutoDefault(false);
     capturePath = new QLineEdit(settings);
     capturePath->setObjectName(QStringLiteral("sessionCaptureEdit"));
     capturePath->setPlaceholderText(QStringLiteral("选择小说搜索、书籍详情或章节详情的 http_req_*.hcy"));
@@ -50,9 +79,12 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     outputDirectory->setObjectName(QStringLiteral("bookOutputDirectoryEdit"));
     outputDirectory->setText(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
     auto *directoryButton = new QPushButton(QStringLiteral("保存目录…"), settings);
-    grid->addWidget(new QLabel(QStringLiteral("书名搜索"), settings), 0, 0);
+    grid->addWidget(new QLabel(QStringLiteral("书名查找"), settings), 0, 0);
     grid->addWidget(keywords, 0, 1);
-    grid->addWidget(searchButton, 0, 2);
+    auto *searchActions = new QHBoxLayout;
+    searchActions->addWidget(searchButton);
+    searchActions->addWidget(globalSearchButton);
+    grid->addLayout(searchActions, 0, 2);
     grid->addWidget(new QLabel(QStringLiteral("书籍 ID"), settings), 1, 0);
     grid->addWidget(bookId, 1, 1, 1, 2);
     grid->addWidget(new QLabel(QStringLiteral("会话请求抓包"), settings), 2, 0);
@@ -70,6 +102,14 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     searchLabel->setWordWrap(true);
     moreSearchButton = new QPushButton(QStringLiteral("加载更多结果"), this);
     moreSearchButton->setObjectName(QStringLiteral("loadMoreBooksButton"));
+    groupButton = new QPushButton(QStringLiteral("浏览分类（%1）").arg(NovelApi::groupTagId()), this);
+    groupButton->setObjectName(QStringLiteral("browseGroupButton"));
+    refreshGroupButton = new QPushButton(QStringLiteral("刷新分组"), this);
+    refreshGroupButton->setObjectName(QStringLiteral("refreshGroupButton"));
+    allButton = new QPushButton(QStringLiteral("加载全部"), this);
+    searchRow->addWidget(groupButton);
+    searchRow->addWidget(refreshGroupButton);
+    searchRow->addWidget(allButton);
     searchRow->addWidget(searchLabel, 1);
     searchRow->addWidget(moreSearchButton);
     layout->addLayout(searchRow);
@@ -92,6 +132,58 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     searchTable->setMinimumHeight(110);
     searchTable->setMaximumHeight(200);
     layout->addWidget(searchTable);
+    resultFilter = new QLineEdit(this);
+    resultFilter->setObjectName(QStringLiteral("bookResultFilterEdit"));
+    resultFilter->setPlaceholderText(QStringLiteral("筛选本列表书名／作者；非完整列表可能遗漏未加载书籍"));
+    auto *filterRow = new QHBoxLayout;
+    detailButton = new QPushButton(QStringLiteral("查看详情／预览"), this);
+    detailButton->setObjectName(QStringLiteral("bookDetailsButton"));
+    filterRow->addWidget(resultFilter, 1);
+    filterRow->addWidget(detailButton);
+    layout->addLayout(filterRow);
+    searchTable->setSortingEnabled(true);
+    connect(resultFilter, &QLineEdit::textChanged, this, &BookDownloadWidget::applyResultFilter);
+    connect(groupButton, &QPushButton::clicked, this, [this] {
+        if (controller->hasGroupCache() || confirmNetwork()) {
+            loadAll = false;
+            resultFilter->clear();
+            controller->browseGroup(capturePath->text().trimmed());
+        }
+    });
+    connect(refreshGroupButton, &QPushButton::clicked, this, [this] {
+        if (confirmNetwork()) {
+            loadAll = false;
+            resultFilter->clear();
+            controller->browseGroup(capturePath->text().trimmed(), true);
+        }
+    });
+    connect(allButton, &QPushButton::clicked, this, [this] {
+        if (loadAll) {
+            loadAll = false;
+            controller->cancel();
+        } else if (confirmNetwork()) {
+            loadAll = true;
+            controller->loadMoreSearch();
+        }
+        updateActions();
+    });
+    connect(searchTable->horizontalHeader(), &QHeaderView::sectionClicked, this, [this](int column) {
+        applyResultFilter();
+        if (column != 2 || controller->isBusy() || !QFileInfo(capturePath->text().trimmed()).isFile()
+            || !controller->canLoadMoreSearch())
+            return;
+        if (confirmNetwork()) {
+            loadAll = true;
+            controller->loadMoreSearch();
+            searchLabel->setText(QStringLiteral("正在加载剩余分页，完成后按章节数统一排序；可点击停止加载。"));
+            updateActions();
+        }
+    });
+    connect(searchTable->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        if (value > 0 && value >= searchTable->verticalScrollBar()->maximum() - 1
+            && !controller->isBusy() && controller->canLoadMoreSearch())
+            moreSearchButton->click();
+    });
 
     auto *actions = new QHBoxLayout;
     catalogButton = new QPushButton(QStringLiteral("仅获取目录"), this);
@@ -168,9 +260,13 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
         updateActions();
     });
     connect(outputDirectory, &QLineEdit::textChanged, this, &BookDownloadWidget::updateActions);
-    connect(searchButton, &QPushButton::clicked, this, [this] {
-        if (confirmNetwork())
+    connect(searchButton, &QPushButton::clicked, this, &BookDownloadWidget::searchGroupBooks);
+    connect(globalSearchButton, &QPushButton::clicked, this, [this] {
+        if (confirmNetwork()) {
+            loadAll = false;
+            resultFilter->clear();
             controller->searchBooks(keywords->text().trimmed(), capturePath->text().trimmed());
+        }
     });
     connect(keywords, &QLineEdit::returnPressed, this, [this] {
         searchButton->click();
@@ -181,6 +277,8 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     });
     connect(searchTable, &QTableWidget::itemSelectionChanged, this, &BookDownloadWidget::selectSearchBook);
     connect(searchTable, &QTableWidget::itemClicked, this, &BookDownloadWidget::selectSearchBook);
+    connect(searchTable, &QTableWidget::itemDoubleClicked, this, &BookDownloadWidget::showBookDetails);
+    connect(detailButton, &QPushButton::clicked, this, &BookDownloadWidget::showBookDetails);
     connect(controller, &BookDownloadController::searchResultsChanged, this, &BookDownloadWidget::showSearchResults);
     connect(catalogButton, &QPushButton::clicked, this, [this] {
         if (confirmNetwork())
@@ -192,13 +290,26 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
             controller->downloadBook(bookId->text().trimmed(), capturePath->text().trimmed(),
                                      outputDirectory->text().trimmed());
     });
-    connect(cancelButton, &QPushButton::clicked, controller, &BookDownloadController::cancel);
+    connect(cancelButton, &QPushButton::clicked, this, [this] {
+        loadAll = false;
+        controller->cancel();
+    });
     connect(controller, &BookDownloadController::bookChanged, this, &BookDownloadWidget::showBook);
     connect(controller, &BookDownloadController::statusChanged, statusLabel, &QLabel::setText);
     connect(controller, &BookDownloadController::busyChanged, this, [this](bool busy) {
+        if (busy)
+            pageSucceeded = false;
         settings->setEnabled(!busy);
         searchTable->setEnabled(!busy);
         if (!busy) {
+            if (loadAll && pageSucceeded && controller->canLoadMoreSearch()) {
+                QTimer::singleShot(0, this, [this] {
+                    if (loadAll && !controller->isBusy())
+                        controller->loadMoreSearch();
+                });
+            } else {
+                loadAll = false;
+            }
             fileProgress->clear();
             if (progress->maximum() == 0) {
                 progress->setRange(0, 1);
@@ -219,7 +330,11 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     connect(controller, &BookDownloadController::progressChanged, this, [this](int completed, int total) {
         if (controller->isSearching()) {
             progress->setRange(0, 0);
-            progress->setFormat(QStringLiteral("正在查询书名…"));
+            progress->setFormat(QStringLiteral("正在读取书籍列表…"));
+        } else if (controller->isPreviewing()) {
+            progress->setRange(0, qMax(1, total));
+            progress->setValue(completed);
+            progress->setFormat(QStringLiteral("预览：%1 / %2 章").arg(completed).arg(total));
         } else {
             progress->setRange(0, qMax(1, total));
             progress->setValue(completed);
@@ -237,13 +352,14 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
         if (row >= 0 && !table->item(row, 4)->text().isEmpty())
             QApplication::clipboard()->setText(table->item(row, 4)->text());
     });
-    updateActions();
+    showSearchResults();
 }
 
 void BookDownloadWidget::invalidateSession()
 {
     networkConfirmed = false;
-    controller->invalidate();
+    loadAll = false;
+    controller->invalidate(capturePath->text().trimmed());
     updateActions();
 }
 
@@ -280,7 +396,10 @@ void BookDownloadWidget::showBook(const NovelBook &book)
 
 void BookDownloadWidget::showSearchResults()
 {
+    pageSucceeded = controller->searchPage() > 0;
     const QSignalBlocker blocker(searchTable);
+    const QSignalBlocker scrollBlocker(searchTable->verticalScrollBar());
+    searchTable->setSortingEnabled(false);
     const auto &books = controller->searchResults();
     const auto selectedId = bookId->text().trimmed();
     searchTable->clearContents();
@@ -290,19 +409,59 @@ void BookDownloadWidget::showSearchResults()
         const auto &book = books[row];
         const QStringList values{book.name, book.author.isEmpty() ? QStringLiteral("未提供") : book.author,
                                  book.chapterCount, book.status, book.id};
-        for (int column = 0; column < values.size(); ++column)
-            searchTable->setItem(row, column, new QTableWidgetItem(values[column]));
+        for (int column = 0; column < values.size(); ++column) {
+            QTableWidgetItem *item = column == 2
+                ? new ChapterCountItem(values[column])
+                : new QTableWidgetItem(values[column]);
+            searchTable->setItem(row, column, item);
+        }
         if (book.id.compare(selectedId, Qt::CaseInsensitive) == 0)
             searchTable->selectRow(row);
     }
+    searchTable->setSortingEnabled(true);
+    applyResultFilter();
     if (controller->searchPage() == 0)
         searchLabel->setText(QStringLiteral("搜索结果：单击书籍自动填入 ID，不会立即下载。"));
     else
-        searchLabel->setText(QStringLiteral("已读取 %1 页，共 %2 本。单击书籍自动填入 ID。%3")
-                                 .arg(controller->searchPage()).arg(books.size())
-                                 .arg(controller->canLoadMoreSearch() ? QStringLiteral("可手动加载更多。")
-                                                                      : QStringLiteral("已停止分页。")));
+        searchLabel->setText(QStringLiteral("%1 · %2 本 · 读取至第 %3 页 · 更新 %4\n%5")
+                                 .arg(controller->isGroupList() ? QStringLiteral("分类 %1 缓存").arg(NovelApi::groupTagId())
+                                                                : QStringLiteral("全站搜索（未限定分类）"))
+                                 .arg(books.size()).arg(controller->searchPage())
+                                 .arg(controller->listUpdatedAt().toLocalTime().toString(QStringLiteral("MM-dd HH:mm")))
+                                 .arg(controller->searchComplete() ? QStringLiteral("已加载全部返回结果，直接排序无需重新请求。")
+                                      : controller->canLoadMoreSearch()
+                                          ? QStringLiteral("未加载完整；章节排序将从下一页继续加载。")
+                                          : QStringLiteral("已停止分页但未确认完整；当前只排序已加载书籍。")));
     updateActions();
+}
+
+void BookDownloadWidget::searchGroupBooks()
+{
+    const bool hasCache = controller->hasGroupCache();
+    if (!hasCache && !QFileInfo(capturePath->text().trimmed()).isFile())
+        return;
+    if (!hasCache && !confirmNetwork())
+        return;
+    loadAll = false;
+    controller->browseGroup(capturePath->text().trimmed());
+    resultFilter->setText(keywords->text().trimmed());
+    if (!controller->isBusy() && controller->canLoadMoreSearch()
+        && QFileInfo(capturePath->text().trimmed()).isFile() && confirmNetwork()) {
+        loadAll = true;
+        controller->loadMoreSearch();
+    } else if (controller->isBusy() && controller->isSearching()) {
+        loadAll = true;
+    }
+    updateActions();
+}
+
+void BookDownloadWidget::applyResultFilter()
+{
+    const QSignalBlocker blocker(searchTable->verticalScrollBar());
+    const auto text = resultFilter->text();
+    for (int row = 0; row < searchTable->rowCount(); ++row)
+        searchTable->setRowHidden(row, !searchTable->item(row, 0)->text().contains(text, Qt::CaseInsensitive)
+            && !searchTable->item(row, 1)->text().contains(text, Qt::CaseInsensitive));
 }
 
 void BookDownloadWidget::selectSearchBook()
@@ -313,11 +472,53 @@ void BookDownloadWidget::selectSearchBook()
     const auto &books = controller->searchResults();
     if (row < 0 || row >= books.size())
         return;
-    const auto &book = books[row];
+    const auto id = searchTable->item(row, 4)->text();
+    const auto found = std::find_if(books.cbegin(), books.cend(), [&id](const NovelSearchBook &book) {
+        return book.id == id;
+    });
+    if (found == books.cend())
+        return;
+    const auto &book = *found;
     bookId->setText(book.id);
     statusLabel->setText(QStringLiteral("已选择《%1》，ID 已填入。请选择保存目录，然后点击“下载并合并”。")
                              .arg(book.name));
     updateActions();
+}
+
+void BookDownloadWidget::showBookDetails()
+{
+    if (controller->isBusy() || searchTable->selectedItems().isEmpty())
+        return;
+    const auto row = searchTable->currentRow();
+    if (row < 0 || !searchTable->item(row, 4))
+        return;
+    const auto id = searchTable->item(row, 4)->text();
+    const auto &books = controller->searchResults();
+    const auto found = std::find_if(books.cbegin(), books.cend(), [&id](const NovelSearchBook &book) {
+        return book.id == id;
+    });
+    if (found == books.cend())
+        return;
+    loadAll = false;
+    const NovelSearchBook selected = *found;
+    BookDetailDialog dialog(selected, this);
+    dialog.setPreviewAvailable(QFileInfo(capturePath->text().trimmed()).isFile());
+    connect(controller, &BookDownloadController::previewCatalogReady, &dialog, &BookDetailDialog::setCatalog);
+    connect(controller, &BookDownloadController::previewChapterReady, &dialog, &BookDetailDialog::setChapter);
+    connect(controller, &BookDownloadController::previewFinished, &dialog, &BookDetailDialog::finishPreview);
+    connect(controller, &BookDownloadController::statusChanged, &dialog, &BookDetailDialog::setMessage);
+    connect(&dialog, &BookDetailDialog::previewRequested, this, [this, &dialog, id] {
+        if (confirmNetwork())
+            controller->previewBook(id, capturePath->text().trimmed());
+        else
+            dialog.finishPreview(QStringLiteral("未授权联网，未获取正文。"));
+    });
+    connect(&dialog, &BookDetailDialog::cancelRequested, controller, &BookDownloadController::cancel);
+    connect(&dialog, &QDialog::finished, this, [this] {
+        if (controller->isPreviewing())
+            controller->cancel();
+    });
+    dialog.exec();
 }
 
 void BookDownloadWidget::updateActions()
@@ -326,8 +527,16 @@ void BookDownloadWidget::updateActions()
     const bool hasBook = !controller->book().chapters.isEmpty();
     const bool hasCapture = QFileInfo(capturePath->text().trimmed()).isFile();
     const bool validInput = NovelApi::isId(bookId->text().trimmed()) && hasCapture;
-    searchButton->setEnabled(!busy && hasCapture && NovelApi::isSearchKeywords(keywords->text().trimmed()));
-    moreSearchButton->setEnabled(!busy && controller->canLoadMoreSearch());
+    const bool validKeywords = NovelApi::isSearchKeywords(keywords->text().trimmed());
+    searchButton->setEnabled(!busy && (hasCapture || controller->hasGroupCache()) && validKeywords);
+    globalSearchButton->setEnabled(!busy && hasCapture && validKeywords);
+    groupButton->setEnabled(!busy && (hasCapture || controller->hasGroupCache()));
+    refreshGroupButton->setEnabled(!busy && hasCapture);
+    allButton->setText(loadAll ? QStringLiteral("停止加载") : QStringLiteral("加载全部"));
+    allButton->setEnabled(loadAll || (!busy && hasCapture && controller->canLoadMoreSearch()));
+    resultFilter->setEnabled(!busy);
+    detailButton->setEnabled(!busy && !searchTable->selectedItems().isEmpty());
+    moreSearchButton->setEnabled(!busy && hasCapture && controller->canLoadMoreSearch());
     catalogButton->setEnabled(!busy && validInput);
     linksButton->setEnabled(!busy && hasBook);
     downloadButton->setEnabled(!busy && validInput && QFileInfo(outputDirectory->text().trimmed()).isDir());

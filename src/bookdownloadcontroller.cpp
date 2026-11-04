@@ -46,14 +46,26 @@ bool hasLinkedAncestor(const QString &path)
 BookDownloadController::BookDownloadController(QObject *parent)
     : QObject(parent), api(new NovelApi(this)), downloader(new ChapterDownload(this))
 {
+    cacheWarning = BookListCache::load(BookListCache::defaultPath(), groupList);
     next.setSingleShot(true);
     connect(&next, &QTimer::timeout, this, [this] {
         if (mode == Mode::Merge)
             mergeNextChapter();
+        else if (mode == Mode::Preview)
+            nextPreviewChapter();
         else
             nextChapter();
     });
     connect(api, &NovelApi::bookReady, this, [this](const NovelBook &book) {
+        if (mode == Mode::PreviewCatalog) {
+            previewBookData = book;
+            previewIndex = 0;
+            setMode(Mode::Preview);
+            emit previewCatalogReady(book);
+            emit progressChanged(0, qMin(3, static_cast<int>(book.chapters.size())));
+            next.start(0);
+            return;
+        }
         currentBook = book;
         emit bookChanged(currentBook);
         emit progressChanged(0, static_cast<int>(book.chapters.size()));
@@ -67,6 +79,14 @@ BookDownloadController::BookDownloadController(QObject *parent)
                        .arg(book.name).arg(book.chapters.size()));
     });
     connect(api, &NovelApi::chapterReady, this, [this](const QString &id, const QUrl &content) {
+        if (mode == Mode::Preview) {
+            if (previewIndex >= previewBookData.chapters.size() || previewBookData.chapters[previewIndex].id != id) {
+                stop(QStringLiteral("返回的预览章节与当前请求不一致。"));
+                return;
+            }
+            downloader->startPreview(content, decodeKey);
+            return;
+        }
         if (mode != Mode::Links && mode != Mode::Download)
             return;
         if (currentBook.chapters[current].id != id) {
@@ -98,34 +118,70 @@ BookDownloadController::BookDownloadController(QObject *parent)
             [this](const QVector<NovelSearchBook> &books, int page, bool hasMore) {
         if (mode != Mode::Search)
             return;
-        if (page != completedSearchPage + 1) {
-            stop(QStringLiteral("搜索返回的页码与当前任务不一致，已停止。"));
+        auto &list = activeList();
+        if (page != list.page + 1) {
+            stop(QStringLiteral("列表返回的页码与当前任务不一致，已停止。"));
             return;
         }
         QSet<QString> ids;
-        for (const auto &book : foundBooks)
+        for (const auto &book : list.books)
             ids.insert(book.id);
+        const auto newCount = std::count_if(books.cbegin(), books.cend(), [&ids](const NovelSearchBook &book) {
+            return !ids.contains(book.id);
+        });
+        if (list.books.size() + newCount > 100000) {
+            list.hasMore = false;
+            list.complete = false;
+            if (groupActive)
+                BookListCache::save(BookListCache::defaultPath(), list);
+            emit searchResultsChanged();
+            stop(QStringLiteral("列表已达到 100000 本限制，未确认完整；已加载结果保留。"));
+            return;
+        }
         int added = 0;
         for (const auto &book : books) {
             if (ids.contains(book.id))
                 continue;
             ids.insert(book.id);
-            foundBooks.append(book);
+            list.books.append(book);
             ++added;
         }
-        completedSearchPage = page;
-        moreSearchResults = hasMore && page < 10000;
+        list.page = page;
+        list.complete = !hasMore;
+        list.updatedAt = QDateTime::currentDateTimeUtc();
+        list.hasMore = hasMore && page < 10000 && !(groupActive && !books.isEmpty() && added == 0);
+        const auto saved = groupActive ? BookListCache::save(BookListCache::defaultPath(), list) : QString();
         emit searchResultsChanged();
         const auto ending = page == 10000 && hasMore
             ? QStringLiteral("已达 10000 页限制，不再继续加载。")
-            : hasMore ? QStringLiteral("可手动加载下一页。") : QStringLiteral("服务器已返回空页，没有更多结果。");
-        finishTask(QStringLiteral("已读取搜索第 %1 页，新增 %2 本，共 %3 本。%4")
-                       .arg(page).arg(added).arg(foundBooks.size()).arg(ending));
+            : !list.hasMore && hasMore ? QStringLiteral("返回的小说全部重复，已停止分页；不代表已确认全量。")
+            : hasMore ? QStringLiteral("可继续加载下一页。") : QStringLiteral("服务器已返回空页，没有更多结果。");
+        finishTask(QStringLiteral("已读取%1第 %2 页，新增 %3 本，共 %4 本。%5%6")
+                       .arg(groupActive ? QStringLiteral("分组") : QStringLiteral("搜索"))
+                       .arg(page).arg(added).arg(list.books.size()).arg(ending)
+                       .arg(saved.isEmpty() ? QString() : QStringLiteral("\n") + saved));
     });
     connect(api, &NovelApi::failed, this, &BookDownloadController::stop);
     connect(downloader, &ChapterDownload::progress, this, &BookDownloadController::downloadProgress);
+    connect(downloader, &ChapterDownload::previewReady, this, [this](const QString &text) {
+        if (mode == Mode::Preview)
+            emit previewChapterReady(previewIndex, text, QStringLiteral("已加载，仅本弹窗内保留"));
+    });
     connect(downloader, &ChapterDownload::finished, this,
             [this](bool success, const QString &message, qint64, qsizetype) {
+        if (mode == Mode::Preview) {
+            if (cancelling) {
+                finishTask(QStringLiteral("预览已取消，已加载内容保留至关闭弹窗。"));
+            } else if (!success) {
+                emit previewChapterReady(previewIndex, {}, QStringLiteral("加载失败"));
+                stop(message);
+            } else {
+                ++previewIndex;
+                emit progressChanged(previewIndex, qMin(3, static_cast<int>(previewBookData.chapters.size())));
+                next.start(0);
+            }
+            return;
+        }
         if (cancelling) {
             updateChapter(QStringLiteral("已取消"));
             finishTask(QStringLiteral("已取消，已完成的 TXT 保留。"));
@@ -162,13 +218,17 @@ void BookDownloadController::setMode(Mode value)
         emit busyChanged(isBusy());
 }
 
-void BookDownloadController::invalidate()
+void BookDownloadController::invalidate(const QString &capturePath)
 {
     if (isBusy())
         return;
     api->clearSession();
+    listCapturePath = capturePath;
     invalidateBook();
-    invalidateSearch();
+    keywordList = {};
+    searchKeywords.clear();
+    groupActive = true;
+    emit searchResultsChanged();
 }
 
 void BookDownloadController::invalidateBook()
@@ -184,20 +244,54 @@ void BookDownloadController::invalidateSearch()
 {
     if (isBusy())
         return;
-    foundBooks.clear();
+    keywordList = {};
     searchKeywords.clear();
-    completedSearchPage = 0;
-    moreSearchResults = false;
+    if (!groupActive)
+        emit searchResultsChanged();
+}
+
+void BookDownloadController::browseGroup(const QString &capturePath, bool refresh)
+{
+    if (isBusy())
+        return;
+    groupActive = true;
+    listCapturePath = capturePath;
+    if (!refresh && groupList.page > 0) {
+        emit searchResultsChanged();
+        emit statusChanged(QStringLiteral("已恢复分组缓存：%1 本，读取至第 %2 页；排序不重复请求已加载分页。%3")
+                               .arg(groupList.books.size()).arg(groupList.page)
+                               .arg(groupList.complete ? QStringLiteral("已加载全部返回结果。")
+                                                       : QStringLiteral("数据未确认完整。")));
+        return;
+    }
+    const auto error = api->importSession(listCapturePath);
+    if (!error.isEmpty()) {
+        emit searchResultsChanged();
+        emit statusChanged(error);
+        return;
+    }
+    groupList = {};
     emit searchResultsChanged();
+    setMode(Mode::Search);
+    emit progressChanged(0, 0);
+    emit statusChanged(QStringLiteral("正在读取分类 %1 的第一页…%2").arg(NovelApi::groupTagId(), cacheWarning));
+    cacheWarning.clear();
+    api->searchBooks({}, 1);
 }
 
 void BookDownloadController::searchBooks(const QString &keywords, const QString &capturePath)
 {
     if (isBusy())
         return;
-    invalidateSearch();
     if (!NovelApi::isSearchKeywords(keywords)) {
         emit statusChanged(QStringLiteral("请输入 1–256 字符的书名或关键词，不支持控制字符。"));
+        return;
+    }
+    if (keywordList.page > 0 && searchKeywords == keywords.trimmed()) {
+        groupActive = false;
+        listCapturePath = capturePath;
+        emit searchResultsChanged();
+        emit statusChanged(QStringLiteral("已恢复该关键词的搜索结果，未重新请求已加载分页。"));
         return;
     }
     const auto error = api->importSession(capturePath);
@@ -206,7 +300,11 @@ void BookDownloadController::searchBooks(const QString &keywords, const QString 
         emit statusChanged(error);
         return;
     }
+    groupActive = false;
+    keywordList = {};
     searchKeywords = keywords.trimmed();
+    listCapturePath = capturePath;
+    emit searchResultsChanged();
     setMode(Mode::Search);
     emit progressChanged(0, 0);
     emit statusChanged(QStringLiteral("正在搜索书名，第 1 页…"));
@@ -215,12 +313,19 @@ void BookDownloadController::searchBooks(const QString &keywords, const QString 
 
 void BookDownloadController::loadMoreSearch()
 {
-    if (isBusy() || !moreSearchResults)
+    if (isBusy() || !activeList().hasMore)
         return;
+    const auto error = api->hasSession() ? QString() : api->importSession(listCapturePath);
     setMode(Mode::Search);
     emit progressChanged(0, 0);
-    emit statusChanged(QStringLiteral("正在加载搜索第 %1 页…").arg(completedSearchPage + 1));
-    api->searchBooks(searchKeywords, completedSearchPage + 1);
+    if (!error.isEmpty()) {
+        stop(error);
+        return;
+    }
+    const auto page = activeList().page + 1;
+    emit statusChanged(QStringLiteral("正在加载%1第 %2 页…")
+                           .arg(groupActive ? QStringLiteral("分组") : QStringLiteral("搜索")).arg(page));
+    api->searchBooks(groupActive ? QString() : searchKeywords, page);
 }
 
 void BookDownloadController::fetchBook(const QString &id, const QString &capturePath)
@@ -258,6 +363,42 @@ void BookDownloadController::requestBook(const QString &id, const QString &captu
     setMode(Mode::Catalog);
     emit statusChanged(QStringLiteral("本机密钥已加载，正在获取书籍目录…"));
     api->fetchBook(id);
+}
+
+void BookDownloadController::previewBook(const QString &id, const QString &capturePath)
+{
+    if (isBusy())
+        return;
+    const auto error = api->importSession(capturePath);
+    if (!error.isEmpty()) {
+        emit previewFinished(error);
+        return;
+    }
+    previewBookData = {};
+    decodeKey = api->chapterKey();
+    setMode(Mode::PreviewCatalog);
+    emit statusChanged(QStringLiteral("正在获取预览目录…"));
+    api->fetchBook(id);
+}
+
+void BookDownloadController::nextPreviewChapter()
+{
+    const auto count = qMin(3, static_cast<int>(previewBookData.chapters.size()));
+    if (previewIndex >= count) {
+        finishTask(QStringLiteral("前三章预览处理完成；无权阅读的章节未获取，正文未写入磁盘。"));
+        return;
+    }
+    const auto &chapter = previewBookData.chapters[previewIndex];
+    if (!chapter.canRead) {
+        emit previewChapterReady(previewIndex, {}, QStringLiteral("当前会话无免费阅读权限，未获取正文"));
+        ++previewIndex;
+        emit progressChanged(previewIndex, count);
+        next.start(0);
+        return;
+    }
+    emit statusChanged(QStringLiteral("正在加载预览 %1 / %2：%3")
+                           .arg(previewIndex + 1).arg(count).arg(chapter.name));
+    api->fetchChapter(chapter.id);
 }
 
 void BookDownloadController::fetchLinks()
@@ -511,19 +652,27 @@ void BookDownloadController::stop(const QString &message)
     api->cancel();
     if (mode == Mode::Links || mode == Mode::Download || mode == Mode::Merge)
         updateChapter(QStringLiteral("已停止"));
-    finishTask(message + QStringLiteral("\n已完成的单章和链接保留，不会生成不完整的新合集，不会自动重试。"));
+    finishTask(message + (isPreviewing()
+        ? QStringLiteral("\n预览已停止，不会自动重试，已加载内容保留至关闭弹窗。")
+        : mode == Mode::Search ? QStringLiteral("\n已加载的列表保留，不会自动重试。")
+        : QStringLiteral("\n已完成的单章和链接保留，不会生成不完整的新合集，不会自动重试。")));
 }
 
 void BookDownloadController::finishTask(const QString &message)
 {
+    const bool preview = isPreviewing();
     next.stop();
     pendingDirectory.clear();
     mergedFile.reset();
     decodeKey.fill('\0');
     decodeKey.clear();
     cancelling = false;
+    if (preview)
+        previewBookData = {};
     setMode(Mode::Idle);
     emit statusChanged(message);
+    if (preview)
+        emit previewFinished(message);
 }
 
 void BookDownloadController::cancel()
@@ -538,6 +687,8 @@ void BookDownloadController::cancel()
     } else {
         if (mode == Mode::Links || mode == Mode::Download || mode == Mode::Merge)
             updateChapter(QStringLiteral("已取消"));
-        finishTask(QStringLiteral("已取消，已完成的单章和链接保留，未生成新的合并版。"));
+        finishTask(isPreviewing() ? QStringLiteral("预览已取消，正文未写入磁盘。")
+            : mode == Mode::Search ? QStringLiteral("列表加载已取消，已加载结果保留。")
+            : QStringLiteral("已取消，已完成的单章和链接保留，未生成新的合并版。"));
     }
 }

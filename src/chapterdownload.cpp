@@ -44,6 +44,17 @@ bool ChapterDownload::isDownloadUrl(const QUrl &url)
 void ChapterDownload::start(const QUrl &url, const QString &outputPath, const QByteArray &key,
                             bool allowOverwrite, bool restrictToNovelCdn)
 {
+    begin(url, outputPath, key, allowOverwrite, restrictToNovelCdn, false);
+}
+
+void ChapterDownload::startPreview(const QUrl &url, const QByteArray &key)
+{
+    begin(url, {}, key, false, true, true);
+}
+
+void ChapterDownload::begin(const QUrl &url, const QString &outputPath, const QByteArray &key,
+                            bool allowOverwrite, bool restrictToNovelCdn, bool preview)
+{
     if (isBusy())
         return;
     if (!isDownloadUrl(url) || (restrictToNovelCdn && !isNovelUrl(url))) {
@@ -54,17 +65,21 @@ void ChapterDownload::start(const QUrl &url, const QString &outputPath, const QB
         emit finished(false, QStringLiteral("正文解码密钥必须恰好为 16 字节。"), 0, 0);
         return;
     }
-    expectedDirectory = restrictToNovelCdn ? QFileInfo(outputPath).dir().canonicalPath() : QString();
-    if (restrictToNovelCdn && expectedDirectory.isEmpty()) {
+    previewMode = preview;
+    previewBody.clear();
+    expectedDirectory = restrictToNovelCdn && !preview ? QFileInfo(outputPath).dir().canonicalPath() : QString();
+    if (restrictToNovelCdn && !preview && expectedDirectory.isEmpty()) {
         emit finished(false, QStringLiteral("书籍保存目录不存在，当前章节未下载。"), 0, 0);
         return;
     }
-    temporary = std::make_unique<QTemporaryFile>(
-        QDir::temp().filePath(QStringLiteral("NovDecoder-XXXXXX.nov")));
-    if (!temporary->open()) {
-        temporary.reset();
-        emit finished(false, QStringLiteral("无法创建章节下载临时文件。"), 0, 0);
-        return;
+    if (!preview) {
+        temporary = std::make_unique<QTemporaryFile>(
+            QDir::temp().filePath(QStringLiteral("NovDecoder-XXXXXX.nov")));
+        if (!temporary->open()) {
+            temporary.reset();
+            emit finished(false, QStringLiteral("无法创建章节下载临时文件。"), 0, 0);
+            return;
+        }
     }
     output = outputPath;
     decodeKey = key;
@@ -116,11 +131,14 @@ void ChapterDownload::readData()
             break;
         if (!fileResponse)
             continue;
-        if (temporary->size() + bytes.size() > NovDecoder::MaxFileSize) {
+        const auto size = previewMode ? previewBody.size() : temporary->size();
+        if (size + bytes.size() > NovDecoder::MaxFileSize) {
             fail(QStringLiteral("下载文件超过 32 MiB 限制。"));
             return;
         }
-        if (temporary->write(bytes) != bytes.size()) {
+        if (previewMode) {
+            previewBody.append(bytes);
+        } else if (temporary->write(bytes) != bytes.size()) {
             fail(QStringLiteral("无法写入章节下载临时文件。"));
             return;
         }
@@ -162,19 +180,35 @@ void ChapterDownload::complete()
             || info.canonicalFilePath().compare(expectedDirectory, Qt::CaseInsensitive) != 0)
             error = QStringLiteral("下载期间保存目录发生变化，当前章节未写入。");
     }
-    if (error.isEmpty() && !temporary->flush())
-        error = QStringLiteral("无法保存章节下载临时文件。");
-    const auto input = temporary->fileName();
-    temporary->close();
     reply->deleteLater();
     reply = nullptr;
     NovDecoder::SaveResult result;
-    if (error.isEmpty())
-        result = NovDecoder::convertFile(input, output, decodeKey, overwrite);
-    else
-        result.error = error;
+    QString previewText;
+    if (previewMode) {
+        if (error.isEmpty()) {
+            const auto decoded = NovDecoder::decode(previewBody, decodeKey);
+            result.error = decoded.error;
+            result.characters = decoded.characters;
+            if (decoded.ok())
+                previewText = QString::fromUtf8(decoded.utf8);
+        } else {
+            result.error = error;
+        }
+        previewBody.clear();
+    } else {
+        if (error.isEmpty() && !temporary->flush())
+            error = QStringLiteral("无法保存章节下载临时文件。");
+        const auto input = temporary->fileName();
+        temporary->close();
+        if (error.isEmpty())
+            result = NovDecoder::convertFile(input, output, decodeKey, overwrite);
+        else
+            result.error = error;
+        temporary.reset();
+    }
     decodeKey.fill('\0');
     decodeKey.clear();
-    temporary.reset();
+    if (previewMode && result.ok())
+        emit previewReady(previewText);
     emit finished(result.ok(), result.error, result.bytesWritten, result.characters);
 }

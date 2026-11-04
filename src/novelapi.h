@@ -18,6 +18,7 @@ struct NovelSearchBook {
     QString author;
     QString chapterCount;
     QString status;
+    QString description;
 };
 
 struct NovelChapter {
@@ -31,6 +32,7 @@ struct NovelChapter {
 struct NovelBook {
     QString id;
     QString name;
+    QString description;
     QVector<NovelChapter> chapters;
 };
 
@@ -52,6 +54,7 @@ public:
     void cancel();
     static bool isId(const QString &id);
     static bool isSearchKeywords(const QString &keywords);
+    static QString groupTagId() { return QStringLiteral("5,10,23"); }
 
 signals:
     void bookReady(const NovelBook &book);

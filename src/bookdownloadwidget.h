@@ -23,7 +23,10 @@ private:
     void updateActions();
     void showBook(const NovelBook &book);
     void showSearchResults();
+    void applyResultFilter();
+    void searchGroupBooks();
     void selectSearchBook();
+    void showBookDetails();
     void invalidateSession();
     bool confirmNetwork();
 
@@ -39,7 +42,9 @@ private:
     QPushButton *cancelButton;
     QPushButton *copyButton;
     QPushButton *searchButton;
+    QPushButton *globalSearchButton;
     QPushButton *moreSearchButton;
+    QPushButton *detailButton;
     QLabel *searchLabel;
     QLabel *bookLabel;
     QLabel *statusLabel;
@@ -48,4 +53,10 @@ private:
     QTableWidget *table;
     QTableWidget *searchTable;
     bool networkConfirmed = false;
+    bool loadAll = false;
+    bool pageSucceeded = false;
+    QPushButton *groupButton;
+    QPushButton *refreshGroupButton;
+    QPushButton *allButton;
+    QLineEdit *resultFilter;
 };
