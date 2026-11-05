@@ -28,7 +28,12 @@ target_link_libraries(novdecoder_core PUBLIC Qt6::Core PRIVATE bcrypt)
 add_library(novdecoder_network STATIC
     src/chapterdownload.cpp src/chapterdownload.h
     src/novelapi.cpp src/novelapi.h
+    src/novelcategory.cpp src/novelcategory.h
     src/localkeyprofile.cpp src/localkeyprofile.h
+    src/sessionprofile.cpp src/sessionprofile.h
+    src/pcaprequestreader.cpp src/pcaprequestreader.h
+    src/mumucapture.cpp src/mumucapture.h
+    src/mumudiscovery.cpp src/mumudiscovery.h
     src/bookdownloadcontroller.cpp src/bookdownloadcontroller.h
     src/booklistcache.cpp src/booklistcache.h)
 target_include_directories(novdecoder_network PUBLIC src)
@@ -38,7 +43,8 @@ target_link_libraries(novdecoder_network PUBLIC novdecoder_core Qt6::Network PRI
 add_library(novdecoder_widgets STATIC
     src/mainwindow.cpp src/mainwindow.h
     src/bookdownloadwidget.cpp src/bookdownloadwidget.h
-    src/bookdetaildialog.cpp src/bookdetaildialog.h)
+    src/bookdetaildialog.cpp src/bookdetaildialog.h
+    src/mumucapturedialog.cpp src/mumucapturedialog.h)
 target_include_directories(novdecoder_widgets PUBLIC src)
 target_link_libraries(novdecoder_widgets PUBLIC novdecoder_network Qt6::Widgets)
 

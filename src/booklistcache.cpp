@@ -42,15 +42,18 @@ bool validText(const QJsonValue &value, qsizetype maximum, bool multiline = fals
 }
 }
 
-QString BookListCache::defaultPath()
+QString BookListCache::defaultPath(const NovelCategory &category)
 {
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
-        .filePath(QStringLiteral("books-4.0.9-group-%1-v1.json")
-                      .arg(NovelApi::groupTagId().replace(QLatin1Char(','), QLatin1Char('-'))));
+    const auto fileName = category.key() == NovelCategory::defaultCategory().key()
+        ? QStringLiteral("books-4.0.9-group-5-10-23-v1.json")
+        : QStringLiteral("books-4.0.9-category-%1-v2.json").arg(category.key());
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).filePath(fileName);
 }
 
-QString BookListCache::load(const QString &path, BookListSnapshot &snapshot)
+QString BookListCache::load(const QString &path, BookListSnapshot &snapshot, const NovelCategory &category)
 {
+    if (!category.isValid())
+        return QStringLiteral("分类条件无效，未读取列表缓存。");
     if (!QFileInfo::exists(path))
         return {};
     if (!safeLocation(path))
@@ -70,9 +73,14 @@ QString BookListCache::load(const QString &path, BookListSnapshot &snapshot)
     BookListSnapshot loaded;
     loaded.page = page.toInt(-1);
     loaded.updatedAt = QDateTime::fromString(object.value(QStringLiteral("updated_at")).toString(), Qt::ISODateWithMs);
-    if (object.value(QStringLiteral("version")).toInt() != 1
+    const auto version = object.value(QStringLiteral("version")).toInt();
+    const bool matchesCategory = version == 1
+        ? category.key() == NovelCategory::defaultCategory().key()
+        : version == 2 && object.value(QStringLiteral("filters")).isObject()
+            && object.value(QStringLiteral("filters")).toObject() == category.parameters();
+    if (!matchesCategory
         || object.value(QStringLiteral("app_version")).toString() != QStringLiteral("4.0.9")
-        || object.value(QStringLiteral("tag_id")).toString() != NovelApi::groupTagId()
+        || object.value(QStringLiteral("tag_id")).toString() != category.tagId
         || !page.isDouble() || page.toDouble() != loaded.page || loaded.page < 1 || loaded.page > 10000
         || !loaded.updatedAt.isValid() || !object.value(QStringLiteral("has_more")).isBool()
         || !object.value(QStringLiteral("complete")).isBool() || !object.value(QStringLiteral("books")).isArray())
@@ -110,9 +118,9 @@ QString BookListCache::load(const QString &path, BookListSnapshot &snapshot)
     return {};
 }
 
-QString BookListCache::save(const QString &path, const BookListSnapshot &snapshot)
+QString BookListCache::save(const QString &path, const BookListSnapshot &snapshot, const NovelCategory &category)
 {
-    if (snapshot.page < 1 || snapshot.page > 10000 || !snapshot.updatedAt.isValid()
+    if (!category.isValid() || snapshot.page < 1 || snapshot.page > 10000 || !snapshot.updatedAt.isValid()
         || snapshot.books.size() > 100000 || (snapshot.complete && snapshot.hasMore))
         return QStringLiteral("列表缓存状态不正确，未写入磁盘；内存结果仍保留。");
     const QFileInfo info(path);
@@ -126,8 +134,8 @@ QString BookListCache::save(const QString &path, const BookListSnapshot &snapsho
             {QStringLiteral("status"), book.status}, {QStringLiteral("description"), book.description}});
     }
     const QJsonObject object{
-        {QStringLiteral("version"), 1}, {QStringLiteral("app_version"), QStringLiteral("4.0.9")},
-        {QStringLiteral("tag_id"), NovelApi::groupTagId()},
+        {QStringLiteral("version"), 2}, {QStringLiteral("app_version"), QStringLiteral("4.0.9")},
+        {QStringLiteral("tag_id"), category.tagId}, {QStringLiteral("filters"), category.parameters()},
         {QStringLiteral("updated_at"), snapshot.updatedAt.toUTC().toString(Qt::ISODateWithMs)},
         {QStringLiteral("page"), snapshot.page}, {QStringLiteral("has_more"), snapshot.hasMore},
         {QStringLiteral("complete"), snapshot.complete}, {QStringLiteral("books"), books}};
@@ -138,5 +146,79 @@ QString BookListCache::save(const QString &path, const BookListSnapshot &snapsho
     file.setDirectWriteFallback(false);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("保存列表缓存失败；内存结果仍保留。");
+    return {};
+}
+
+QString BookListCache::categoriesPath()
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+        .filePath(QStringLiteral("categories-4.0.9-v1.json"));
+}
+
+QString BookListCache::loadCategories(const QString &path, QVector<NovelCategory> &categories)
+{
+    if (!QFileInfo::exists(path))
+        return {};
+    if (!safeLocation(path))
+        return QStringLiteral("分类配置位置不安全，未读取。");
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size() <= 0 || file.size() > 256 * 1024)
+        return QStringLiteral("分类配置不可读或超过 256 KiB，未读取。");
+    const auto bytes = file.read(256 * 1024 + 1);
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(bytes, &error);
+    const auto object = document.object();
+    if (file.error() != QFileDevice::NoError || bytes.size() > 256 * 1024
+        || error.error != QJsonParseError::NoError || !document.isObject()
+        || object.value(QStringLiteral("version")).toInt() != 1
+        || object.value(QStringLiteral("app_version")).toString() != QStringLiteral("4.0.9")
+        || !object.value(QStringLiteral("categories")).isArray())
+        return QStringLiteral("分类配置格式不正确，未替换当前分类。");
+    const auto entries = object.value(QStringLiteral("categories")).toArray();
+    if (entries.isEmpty() || entries.size() > 256)
+        return QStringLiteral("分类数量无效，最多支持 256 个分类。");
+    QVector<NovelCategory> loaded;
+    QSet<QString> keys;
+    for (const auto &entry : entries) {
+        const auto item = entry.toObject();
+        NovelCategory category;
+        if (!entry.isObject() || !validText(item.value(QStringLiteral("name")), 128)
+            || item.value(QStringLiteral("name")).toString().trimmed().isEmpty()
+            || !item.value(QStringLiteral("filters")).isObject()
+            || !NovelCategory::fromRequestData(item.value(QStringLiteral("filters")).toObject(), category).isEmpty()
+            || keys.contains(category.key()))
+            return QStringLiteral("分类配置包含无效或重复记录，未替换当前分类。");
+        category.name = item.value(QStringLiteral("name")).toString();
+        keys.insert(category.key());
+        loaded.append(category);
+    }
+    categories = std::move(loaded);
+    return {};
+}
+
+QString BookListCache::saveCategories(const QString &path, const QVector<NovelCategory> &categories)
+{
+    if (categories.isEmpty() || categories.size() > 256)
+        return QStringLiteral("分类数量无效，最多支持 256 个分类。");
+    QJsonArray entries;
+    QSet<QString> keys;
+    for (const auto &category : categories) {
+        if (!category.isValid() || !validText(category.name, 128) || category.name.trimmed().isEmpty()
+            || keys.contains(category.key()))
+            return QStringLiteral("分类名称或条件无效，或包含重复分类，未保存。");
+        keys.insert(category.key());
+        entries.append(QJsonObject{{QStringLiteral("name"), category.name},
+                                   {QStringLiteral("filters"), category.parameters()}});
+    }
+    const auto bytes = QJsonDocument(QJsonObject{
+        {QStringLiteral("version"), 1}, {QStringLiteral("app_version"), QStringLiteral("4.0.9")},
+        {QStringLiteral("categories"), entries}}).toJson(QJsonDocument::Compact);
+    if (bytes.size() > 256 * 1024 || !safeLocation(path)
+        || !QDir().mkpath(QFileInfo(path).absolutePath()) || !safeLocation(path))
+        return QStringLiteral("无法安全保存分类配置，未保存分类配置。");
+    QSaveFile file(path);
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+        return QStringLiteral("保存分类配置失败，未保存分类配置。");
     return {};
 }

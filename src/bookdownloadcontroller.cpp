@@ -2,11 +2,14 @@
 #include "chapterdownload.h"
 #include "novdecoder.h"
 
+#include <algorithm>
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QStringDecoder>
 #include <QTemporaryFile>
 
@@ -46,7 +49,35 @@ bool hasLinkedAncestor(const QString &path)
 BookDownloadController::BookDownloadController(QObject *parent)
     : QObject(parent), api(new NovelApi(this)), downloader(new ChapterDownload(this))
 {
-    cacheWarning = BookListCache::load(BookListCache::defaultPath(), groupList);
+    cacheWarning = BookListCache::loadCategories(BookListCache::categoriesPath(), categoryList);
+    category = categoryList.first();
+    const auto listError = BookListCache::load(BookListCache::defaultPath(category), groupList(), category);
+    if (!listError.isEmpty())
+        cacheWarning += QStringLiteral("\n") + listError;
+    SessionProfile savedSession;
+    sessionWarning = SessionStore::load(SessionStore::defaultPath(), savedSession);
+    if (sessionWarning.isEmpty() && !savedSession.deviceId.isEmpty()) {
+        sessionWarning = api->restoreSession(savedSession);
+        if (!sessionWarning.isEmpty())
+            sessionWarning.prepend(QStringLiteral("未能恢复保存的会话："));
+    }
+    savedSession.clearCredentials();
+    connect(api, &NovelApi::sessionChanged, this, [this] {
+        sessionWarning = SessionStore::save(SessionStore::defaultPath(), api->sessionProfile());
+        emit sessionChanged();
+    });
+    connect(api, &NovelApi::sessionReady, this, [this] {
+        if (mode != Mode::Authentication)
+            return;
+        currentBook = {};
+        keywordList = {};
+        searchKeywords.clear();
+        groupActive = true;
+        emit bookChanged(currentBook);
+        emit searchResultsChanged();
+        finishTask(QStringLiteral("会话获取成功，可直接搜索、预览和下载；无需再选择抓包。%1")
+                       .arg(sessionWarning.isEmpty() ? QString() : QStringLiteral("\n") + sessionWarning));
+    });
     next.setSingleShot(true);
     connect(&next, &QTimer::timeout, this, [this] {
         if (mode == Mode::Merge)
@@ -133,7 +164,7 @@ BookDownloadController::BookDownloadController(QObject *parent)
             list.hasMore = false;
             list.complete = false;
             if (groupActive)
-                BookListCache::save(BookListCache::defaultPath(), list);
+                BookListCache::save(BookListCache::defaultPath(category), list, category);
             emit searchResultsChanged();
             stop(QStringLiteral("列表已达到 100000 本限制，未确认完整；已加载结果保留。"));
             return;
@@ -150,7 +181,7 @@ BookDownloadController::BookDownloadController(QObject *parent)
         list.complete = !hasMore;
         list.updatedAt = QDateTime::currentDateTimeUtc();
         list.hasMore = hasMore && page < 10000 && !(groupActive && !books.isEmpty() && added == 0);
-        const auto saved = groupActive ? BookListCache::save(BookListCache::defaultPath(), list) : QString();
+        const auto saved = groupActive ? BookListCache::save(BookListCache::defaultPath(category), list, category) : QString();
         emit searchResultsChanged();
         const auto ending = page == 10000 && hasMore
             ? QStringLiteral("已达 10000 页限制，不再继续加载。")
@@ -218,17 +249,111 @@ void BookDownloadController::setMode(Mode value)
         emit busyChanged(isBusy());
 }
 
-void BookDownloadController::invalidate(const QString &capturePath)
+QString BookDownloadController::sessionDescription() const
 {
-    if (isBusy())
-        return;
-    api->clearSession();
-    listCapturePath = capturePath;
+    if (!sessionWarning.isEmpty())
+        return sessionWarning;
+    if (!hasDeviceIdentity())
+        return QStringLiteral("尚无会话：可获取设备会话、账号登录，或导入一次自己的请求抓包。");
+    if (!hasSession())
+        return QStringLiteral("设备身份已保留，会话未就绪或已过期；请主动刷新或重新账号登录。");
+    return isAccountSession() ? QStringLiteral("会话已就绪（账号登录或抓包导入），受当前 Windows 用户保护。")
+                              : QStringLiteral("设备会话已就绪，受当前 Windows 用户保护。");
+}
+
+void BookDownloadController::clearBookSessionState()
+{
     invalidateBook();
     keywordList = {};
     searchKeywords.clear();
     groupActive = true;
     emit searchResultsChanged();
+}
+
+void BookDownloadController::invalidate(const QString &capturePath)
+{
+    if (isBusy())
+        return;
+    listCapturePath = capturePath;
+    clearBookSessionState();
+}
+
+QString BookDownloadController::ensureSession(const QString &capturePath)
+{
+    if (api->hasSession())
+        return api->loadSessionKeys();
+    if (!api->sessionProfile().deviceId.isEmpty())
+        return QStringLiteral("当前会话已过期或尚未登录，请点击获取／刷新会话或账号登录；不会自动重新使用旧抓包。");
+    if (capturePath.isEmpty())
+        return QStringLiteral("请先获取设备会话、账号登录，或导入有效请求抓包。");
+    return api->importSession(capturePath);
+}
+
+void BookDownloadController::importCapture(const QString &capturePath)
+{
+    if (isBusy())
+        return;
+    const auto error = api->importSession(capturePath);
+    if (!error.isEmpty()) {
+        emit statusChanged(error);
+        return;
+    }
+    listCapturePath = capturePath;
+    clearBookSessionState();
+    emit statusChanged(QStringLiteral("会话已导入并受保护保存；有效期间不必重复导入。%1")
+                           .arg(sessionWarning.isEmpty() ? QString() : QStringLiteral("\n") + sessionWarning));
+}
+
+QString BookDownloadController::importCapturedRequest(const QByteArray &raw)
+{
+    if (isBusy())
+        return QStringLiteral("请先结束当前任务，再采集会话。");
+    const auto error = api->importRequest(raw);
+    if (!error.isEmpty())
+        return error;
+    clearBookSessionState();
+    emit statusChanged(QStringLiteral("已从 MuMu 目标请求导入会话，无需生成抓包文件。%1")
+                           .arg(sessionWarning.isEmpty() ? QString() : QStringLiteral("\n") + sessionWarning));
+    return {};
+}
+
+void BookDownloadController::acquireDeviceSession(bool allowNewIdentity)
+{
+    if (isBusy())
+        return;
+    setMode(Mode::Authentication);
+    emit progressChanged(0, 0);
+    emit statusChanged(QStringLiteral("正在通过 App 正常设备接口获取会话，不会自动重试或更换设备身份…"));
+    api->acquireDeviceSession(allowNewIdentity);
+}
+
+void BookDownloadController::loginAccount(const QString &account, const QString &password, bool allowNewIdentity)
+{
+    if (isBusy())
+        return;
+    setMode(Mode::Authentication);
+    emit progressChanged(0, 0);
+    emit statusChanged(QStringLiteral("正在正常账号登录；不会保存密码，也不会自动注册或重试…"));
+    api->loginAccount(account, password, allowNewIdentity);
+}
+
+void BookDownloadController::forgetSession()
+{
+    if (isBusy() || !hasDeviceIdentity())
+        return;
+    SessionProfile identity = api->sessionProfile();
+    identity.clearCredentials();
+    const auto saved = SessionStore::save(SessionStore::defaultPath(), identity);
+    {
+        const QSignalBlocker blocker(api);
+        api->restoreSession(identity);
+    }
+    sessionWarning = saved;
+    emit sessionChanged();
+    clearBookSessionState();
+    emit statusChanged(saved.isEmpty()
+        ? QStringLiteral("已清除保存的会话凭证，保留原设备身份，不会自动换号。")
+        : QStringLiteral("内存会话已清除，但无法更新磁盘上的旧会话；重启仍可能恢复旧凭证。请修复保存权限后再次清除。\n%1").arg(saved));
 }
 
 void BookDownloadController::invalidateBook()
@@ -250,33 +375,137 @@ void BookDownloadController::invalidateSearch()
         emit searchResultsChanged();
 }
 
+QString BookDownloadController::selectCategory(const QString &key)
+{
+    if (isBusy())
+        return QStringLiteral("请先结束当前任务，再切换分类。");
+    const auto found = std::find_if(categoryList.cbegin(), categoryList.cend(), [&key](const NovelCategory &item) {
+        return item.key() == key;
+    });
+    if (found == categoryList.cend())
+        return QStringLiteral("所选分类不存在。");
+    category = *found;
+    groupActive = true;
+    if (!groupLists.contains(key)) {
+        const auto error = BookListCache::load(BookListCache::defaultPath(category), groupList(), category);
+        if (!error.isEmpty())
+            emit statusChanged(error);
+    }
+    emit searchResultsChanged();
+    return {};
+}
+
+QString BookDownloadController::addCategory(const NovelCategory &value)
+{
+    if (isBusy())
+        return QStringLiteral("请先结束当前任务，再添加分类。");
+    if (std::any_of(categoryList.cbegin(), categoryList.cend(), [&value](const NovelCategory &item) {
+            return item.key() == value.key();
+        }))
+        return QStringLiteral("相同筛选条件的分类已存在，未重复添加。");
+    auto updated = categoryList;
+    updated.append(value);
+    const auto error = saveCategoryList(updated);
+    if (!error.isEmpty())
+        return error;
+    categoryList = std::move(updated);
+    selectCategory(value.key());
+    emit categoriesChanged();
+    return {};
+}
+
+QString BookDownloadController::renameCategory(const QString &key, const QString &name)
+{
+    if (isBusy())
+        return QStringLiteral("请先结束当前任务，再重命名分类。");
+    const auto found = std::find_if(categoryList.cbegin(), categoryList.cend(), [&key](const NovelCategory &item) {
+        return item.key() == key;
+    });
+    if (found == categoryList.cend())
+        return QStringLiteral("所选分类不存在。");
+    const auto trimmed = name.trimmed();
+    if (trimmed.isEmpty() || trimmed.size() > 128)
+        return QStringLiteral("分类名称应为 1–128 字符，不能全为空白。");
+    if (trimmed == found->name)
+        return {};
+    auto updated = categoryList;
+    updated[found - categoryList.cbegin()].name = trimmed;
+    const auto error = saveCategoryList(updated);
+    if (!error.isEmpty())
+        return error;
+    const bool currentCategory = category.key() == key;
+    categoryList = std::move(updated);
+    if (currentCategory)
+        category.name = trimmed;
+    emit categoriesChanged();
+    if (currentCategory && groupActive)
+        emit searchResultsChanged();
+    return {};
+}
+
+QString BookDownloadController::removeCategory(const QString &key)
+{
+    if (isBusy())
+        return QStringLiteral("请先结束当前任务，再删除分类。");
+    const auto found = std::find_if(categoryList.cbegin(), categoryList.cend(), [&key](const NovelCategory &item) {
+        return item.key() == key;
+    });
+    if (found == categoryList.cend())
+        return QStringLiteral("所选分类不存在。");
+    if (categoryList.size() == 1)
+        return QStringLiteral("至少需要保留一个小说分类，未删除。");
+    const auto index = found - categoryList.cbegin();
+    auto updated = categoryList;
+    updated.removeAt(index);
+    const auto error = saveCategoryList(updated);
+    if (!error.isEmpty())
+        return error;
+    const bool currentCategory = category.key() == key;
+    const auto fallbackKey = updated[qMin(index, updated.size() - 1)].key();
+    categoryList = std::move(updated);
+    if (currentCategory)
+        selectCategory(fallbackKey);
+    emit categoriesChanged();
+    return {};
+}
+
+QString BookDownloadController::saveCategoryList(const QVector<NovelCategory> &updated) const
+{
+    QVector<NovelCategory> existing;
+    const auto loadError = BookListCache::loadCategories(BookListCache::categoriesPath(), existing);
+    if (!loadError.isEmpty())
+        return loadError + QStringLiteral("请先备份并修复原分类配置，再修改分类。");
+    return BookListCache::saveCategories(BookListCache::categoriesPath(), updated);
+}
+
 void BookDownloadController::browseGroup(const QString &capturePath, bool refresh)
 {
     if (isBusy())
         return;
     groupActive = true;
     listCapturePath = capturePath;
-    if (!refresh && groupList.page > 0) {
+    auto &list = groupList();
+    if (!refresh && list.page > 0) {
         emit searchResultsChanged();
         emit statusChanged(QStringLiteral("已恢复分组缓存：%1 本，读取至第 %2 页；排序不重复请求已加载分页。%3")
-                               .arg(groupList.books.size()).arg(groupList.page)
-                               .arg(groupList.complete ? QStringLiteral("已加载全部返回结果。")
+                               .arg(list.books.size()).arg(list.page)
+                               .arg(list.complete ? QStringLiteral("已加载全部返回结果。")
                                                        : QStringLiteral("数据未确认完整。")));
         return;
     }
-    const auto error = api->importSession(listCapturePath);
+    const auto error = ensureSession(listCapturePath);
     if (!error.isEmpty()) {
         emit searchResultsChanged();
         emit statusChanged(error);
         return;
     }
-    groupList = {};
+    list = {};
     emit searchResultsChanged();
     setMode(Mode::Search);
     emit progressChanged(0, 0);
-    emit statusChanged(QStringLiteral("正在读取分类 %1 的第一页…%2").arg(NovelApi::groupTagId(), cacheWarning));
+    emit statusChanged(QStringLiteral("正在读取分类“%1”的第一页…%2").arg(category.name, cacheWarning));
     cacheWarning.clear();
-    api->searchBooks({}, 1);
+    api->searchBooks({}, 1, category);
 }
 
 void BookDownloadController::searchBooks(const QString &keywords, const QString &capturePath)
@@ -294,9 +523,8 @@ void BookDownloadController::searchBooks(const QString &keywords, const QString 
         emit statusChanged(QStringLiteral("已恢复该关键词的搜索结果，未重新请求已加载分页。"));
         return;
     }
-    const auto error = api->importSession(capturePath);
+    const auto error = ensureSession(capturePath);
     if (!error.isEmpty()) {
-        api->clearSession();
         emit statusChanged(error);
         return;
     }
@@ -315,7 +543,7 @@ void BookDownloadController::loadMoreSearch()
 {
     if (isBusy() || !activeList().hasMore)
         return;
-    const auto error = api->hasSession() ? QString() : api->importSession(listCapturePath);
+    const auto error = ensureSession(listCapturePath);
     setMode(Mode::Search);
     emit progressChanged(0, 0);
     if (!error.isEmpty()) {
@@ -325,7 +553,7 @@ void BookDownloadController::loadMoreSearch()
     const auto page = activeList().page + 1;
     emit statusChanged(QStringLiteral("正在加载%1第 %2 页…")
                            .arg(groupActive ? QStringLiteral("分组") : QStringLiteral("搜索")).arg(page));
-    api->searchBooks(groupActive ? QString() : searchKeywords, page);
+    api->searchBooks(groupActive ? QString() : searchKeywords, page, category);
 }
 
 void BookDownloadController::fetchBook(const QString &id, const QString &capturePath)
@@ -353,9 +581,8 @@ void BookDownloadController::requestBook(const QString &id, const QString &captu
     currentBook = {};
     emit bookChanged(currentBook);
     emit progressChanged(0, 0);
-    const auto error = api->importSession(capturePath);
+    const auto error = ensureSession(capturePath);
     if (!error.isEmpty()) {
-        api->clearSession();
         emit statusChanged(error);
         return;
     }
@@ -369,7 +596,7 @@ void BookDownloadController::previewBook(const QString &id, const QString &captu
 {
     if (isBusy())
         return;
-    const auto error = api->importSession(capturePath);
+    const auto error = ensureSession(capturePath);
     if (!error.isEmpty()) {
         emit previewFinished(error);
         return;
@@ -652,7 +879,9 @@ void BookDownloadController::stop(const QString &message)
     api->cancel();
     if (mode == Mode::Links || mode == Mode::Download || mode == Mode::Merge)
         updateChapter(QStringLiteral("已停止"));
-    finishTask(message + (isPreviewing()
+    finishTask(message + (mode == Mode::Authentication
+        ? QStringLiteral("\n会话操作已停止，不会重试密码、自动注册或切换身份。")
+        : isPreviewing()
         ? QStringLiteral("\n预览已停止，不会自动重试，已加载内容保留至关闭弹窗。")
         : mode == Mode::Search ? QStringLiteral("\n已加载的列表保留，不会自动重试。")
         : QStringLiteral("\n已完成的单章和链接保留，不会生成不完整的新合集，不会自动重试。")));
@@ -687,7 +916,8 @@ void BookDownloadController::cancel()
     } else {
         if (mode == Mode::Links || mode == Mode::Download || mode == Mode::Merge)
             updateChapter(QStringLiteral("已取消"));
-        finishTask(isPreviewing() ? QStringLiteral("预览已取消，正文未写入磁盘。")
+        finishTask(mode == Mode::Authentication ? QStringLiteral("会话请求已取消；不会自动重新发送，原设备身份保留。")
+            : isPreviewing() ? QStringLiteral("预览已取消，正文未写入磁盘。")
             : mode == Mode::Search ? QStringLiteral("列表加载已取消，已加载结果保留。")
             : QStringLiteral("已取消，已完成的单章和链接保留，未生成新的合并版。"));
     }

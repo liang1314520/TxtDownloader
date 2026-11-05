@@ -128,5 +128,5 @@ void BookDetailDialog::setPreviewAvailable(bool available)
 {
     loadButton->setEnabled(available);
     if (!available)
-        setMessage(QStringLiteral("简介可离线查看；请选择有效请求抓包后再打开弹窗加载正文。"));
+        setMessage(QStringLiteral("简介可离线查看；请先获取有效会话或导入请求抓包，再打开弹窗加载正文。"));
 }

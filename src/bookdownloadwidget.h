@@ -3,6 +3,7 @@
 #include <QWidget>
 
 class BookDownloadController;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QProgressBar;
@@ -27,8 +28,17 @@ private:
     void searchGroupBooks();
     void selectSearchBook();
     void showBookDetails();
+    void showAccountLogin();
+    void showMuMuCapture(bool categoryOnly = false);
+    void updateCategories();
+    void renameCurrentCategory();
+    void removeCurrentCategory();
+    void refreshDeviceSession();
+    void updateSessionStatus();
     void invalidateSession();
     bool confirmNetwork();
+    bool confirmDeviceIdentity();
+    bool hasSessionSource() const;
 
     BookDownloadController *controller;
     QWidget *settings;
@@ -45,6 +55,12 @@ private:
     QPushButton *globalSearchButton;
     QPushButton *moreSearchButton;
     QPushButton *detailButton;
+    QLabel *sessionLabel;
+    QPushButton *importSessionButton;
+    QPushButton *deviceSessionButton;
+    QPushButton *accountLoginButton;
+    QPushButton *captureSessionButton;
+    QPushButton *forgetSessionButton;
     QLabel *searchLabel;
     QLabel *bookLabel;
     QLabel *statusLabel;
@@ -55,6 +71,10 @@ private:
     bool networkConfirmed = false;
     bool loadAll = false;
     bool pageSucceeded = false;
+    QComboBox *categoryCombo;
+    QPushButton *captureCategoryButton;
+    QPushButton *renameCategoryButton;
+    QPushButton *deleteCategoryButton;
     QPushButton *groupButton;
     QPushButton *refreshGroupButton;
     QPushButton *allButton;

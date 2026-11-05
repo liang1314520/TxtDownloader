@@ -1,5 +1,8 @@
 #pragma once
 
+#include "sessionprofile.h"
+#include "novelcategory.h"
+
 #include <QObject>
 #include <QElapsedTimer>
 #include <QJsonObject>
@@ -34,6 +37,8 @@ struct NovelBook {
     QString name;
     QString description;
     QVector<NovelChapter> chapters;
+
+    void normalizeChapterOrder();
 };
 
 class NovelApi : public QObject {
@@ -44,26 +49,37 @@ public:
     ~NovelApi() override;
 
     QString importSession(const QString &capturePath);
+    QString importRequest(const QByteArray &raw);
+    static QString categoryFromRequest(const QByteArray &raw, NovelCategory &category);
     const QByteArray &chapterKey() const { return contentKey; }
+    const SessionProfile &sessionProfile() const { return session; }
+    QString restoreSession(const SessionProfile &profile);
+    QString loadSessionKeys();
+    void acquireDeviceSession(bool allowNewIdentity = false);
+    void loginAccount(const QString &account, const QString &password, bool allowNewIdentity = false);
+    static QString parseSessionToken(const QJsonObject &data, SessionProfile &profile, bool accountSession);
     void clearSession();
-    bool hasSession() const { return !token.isEmpty(); }
+    bool hasSession() const { return session.hasSession(); }
     bool isBusy() const { return active; }
     void fetchBook(const QString &id);
     void fetchChapter(const QString &id);
-    void searchBooks(const QString &keywords, int page);
+    void searchBooks(const QString &keywords, int page,
+                     const NovelCategory &category = NovelCategory::defaultCategory());
     void cancel();
     static bool isId(const QString &id);
     static bool isSearchKeywords(const QString &keywords);
-    static QString groupTagId() { return QStringLiteral("5,10,23"); }
 
 signals:
     void bookReady(const NovelBook &book);
     void chapterReady(const QString &id, const QUrl &content);
     void searchReady(const QVector<NovelSearchBook> &books, int page, bool hasMore);
+    void sessionChanged();
+    void sessionReady();
     void failed(const QString &message);
 
 private:
-    enum class RequestKind { Book, Chapter, Search };
+    enum class RequestKind { Book, Chapter, Search, DeviceSession, AccountLogin };
+    QString prepareSessionRequest(bool allowNewIdentity);
     void prepare(RequestKind kind, const QString &id);
     void enqueue(RequestKind kind, const QJsonObject &data);
     void send();
@@ -86,8 +102,6 @@ private:
     QByteArray responseBody;
     QByteArray apiKey;
     QByteArray contentKey;
-    QString token;
-    QString deviceId;
-    QMap<QByteArray, QByteArray> sessionHeaders;
+    SessionProfile session;
     QString responseError;
 };

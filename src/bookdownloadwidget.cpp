@@ -1,12 +1,18 @@
 #include "bookdownloadwidget.h"
 #include "bookdownloadcontroller.h"
 #include "bookdetaildialog.h"
+#include "mumucapturedialog.h"
 
 #include <algorithm>
 
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDir>
+#include <QInputDialog>
+#include <QJsonDocument>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -50,7 +56,7 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     auto *notice = new QLabel(QStringLiteral(
         "默认在指定分类内筛选书名／作者；跨分类查找请使用“全站搜索”。单击选书、双击查看简介与预览。\n"
-        "自动使用本机 App 4.0.9 密钥；会话仅在内存中使用，仅处理当前会话免费可阅读的章节。"), this);
+        "支持直接获取设备会话或账号登录，会话由 Windows DPAPI 加密复用；不保存密码，仅处理当前会话免费可阅读的章节。"), this);
     notice->setWordWrap(true);
     layout->addWidget(notice);
     settings = new QWidget(this);
@@ -73,8 +79,10 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     globalSearchButton->setAutoDefault(false);
     capturePath = new QLineEdit(settings);
     capturePath->setObjectName(QStringLiteral("sessionCaptureEdit"));
-    capturePath->setPlaceholderText(QStringLiteral("选择小说搜索、书籍详情或章节详情的 http_req_*.hcy"));
+    capturePath->setPlaceholderText(QStringLiteral("备用：选择自己的 http_req_*.hcy，点击导入后可跨重启复用"));
     auto *captureButton = new QPushButton(QStringLiteral("选择抓包…"), settings);
+    importSessionButton = new QPushButton(QStringLiteral("导入并记住"), settings);
+    importSessionButton->setObjectName(QStringLiteral("importSessionButton"));
     outputDirectory = new QLineEdit(settings);
     outputDirectory->setObjectName(QStringLiteral("bookOutputDirectoryEdit"));
     outputDirectory->setText(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
@@ -87,22 +95,61 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     grid->addLayout(searchActions, 0, 2);
     grid->addWidget(new QLabel(QStringLiteral("书籍 ID"), settings), 1, 0);
     grid->addWidget(bookId, 1, 1, 1, 2);
-    grid->addWidget(new QLabel(QStringLiteral("会话请求抓包"), settings), 2, 0);
+    grid->addWidget(new QLabel(QStringLiteral("备用请求抓包"), settings), 2, 0);
     grid->addWidget(capturePath, 2, 1);
-    grid->addWidget(captureButton, 2, 2);
+    auto *captureActions = new QHBoxLayout;
+    captureActions->addWidget(captureButton);
+    captureActions->addWidget(importSessionButton);
+    grid->addLayout(captureActions, 2, 2);
     grid->addWidget(new QLabel(QStringLiteral("TXT 保存目录"), settings), 3, 0);
     grid->addWidget(outputDirectory, 3, 1);
     grid->addWidget(directoryButton, 3, 2);
+    auto *sessionActions = new QHBoxLayout;
+    deviceSessionButton = new QPushButton(QStringLiteral("获取／刷新设备会话"), settings);
+    deviceSessionButton->setObjectName(QStringLiteral("deviceSessionButton"));
+    accountLoginButton = new QPushButton(QStringLiteral("账号登录…"), settings);
+    accountLoginButton->setObjectName(QStringLiteral("accountLoginButton"));
+    captureSessionButton = new QPushButton(QStringLiteral("MuMu 自动采集…"), settings);
+    captureSessionButton->setObjectName(QStringLiteral("captureSessionButton"));
+    forgetSessionButton = new QPushButton(QStringLiteral("清除会话"), settings);
+    forgetSessionButton->setObjectName(QStringLiteral("forgetSessionButton"));
+    sessionActions->addWidget(deviceSessionButton);
+    sessionActions->addWidget(accountLoginButton);
+    sessionActions->addWidget(captureSessionButton);
+    sessionActions->addWidget(forgetSessionButton);
+    sessionActions->addStretch();
+    grid->addWidget(new QLabel(QStringLiteral("直接会话"), settings), 4, 0);
+    grid->addLayout(sessionActions, 4, 1, 1, 2);
+    sessionLabel = new QLabel(controller->sessionDescription(), settings);
+    sessionLabel->setObjectName(QStringLiteral("sessionStateLabel"));
+    sessionLabel->setTextFormat(Qt::PlainText);
+    sessionLabel->setWordWrap(true);
+    grid->addWidget(sessionLabel, 5, 0, 1, 3);
     grid->setColumnStretch(1, 1);
     layout->addWidget(settings);
 
+    auto *categoryRow = new QHBoxLayout;
+    categoryCombo = new QComboBox(this);
+    categoryCombo->setObjectName(QStringLiteral("bookCategoryCombo"));
+    captureCategoryButton = new QPushButton(QStringLiteral("采集添加分类…"), this);
+    captureCategoryButton->setObjectName(QStringLiteral("captureCategoryButton"));
+    renameCategoryButton = new QPushButton(QStringLiteral("重命名…"), this);
+    renameCategoryButton->setObjectName(QStringLiteral("renameCategoryButton"));
+    deleteCategoryButton = new QPushButton(QStringLiteral("删除…"), this);
+    deleteCategoryButton->setObjectName(QStringLiteral("deleteCategoryButton"));
+    categoryRow->addWidget(new QLabel(QStringLiteral("小说分类"), this));
+    categoryRow->addWidget(categoryCombo, 1);
+    categoryRow->addWidget(renameCategoryButton);
+    categoryRow->addWidget(deleteCategoryButton);
+    categoryRow->addWidget(captureCategoryButton);
+    layout->addLayout(categoryRow);
     auto *searchRow = new QHBoxLayout;
     searchLabel = new QLabel(QStringLiteral("搜索结果：单击书籍自动填入 ID，不会立即下载。"), this);
     searchLabel->setTextFormat(Qt::PlainText);
     searchLabel->setWordWrap(true);
     moreSearchButton = new QPushButton(QStringLiteral("加载更多结果"), this);
     moreSearchButton->setObjectName(QStringLiteral("loadMoreBooksButton"));
-    groupButton = new QPushButton(QStringLiteral("浏览分类（%1）").arg(NovelApi::groupTagId()), this);
+    groupButton = new QPushButton(QStringLiteral("浏览当前分类"), this);
     groupButton->setObjectName(QStringLiteral("browseGroupButton"));
     refreshGroupButton = new QPushButton(QStringLiteral("刷新分组"), this);
     refreshGroupButton->setObjectName(QStringLiteral("refreshGroupButton"));
@@ -169,7 +216,7 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     });
     connect(searchTable->horizontalHeader(), &QHeaderView::sectionClicked, this, [this](int column) {
         applyResultFilter();
-        if (column != 2 || controller->isBusy() || !QFileInfo(capturePath->text().trimmed()).isFile()
+        if (column != 2 || controller->isBusy() || !hasSessionSource()
             || !controller->canLoadMoreSearch())
             return;
         if (confirmNetwork()) {
@@ -232,7 +279,7 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
     fileProgress = new QLabel(this);
     fileProgress->setTextFormat(Qt::PlainText);
     layout->addWidget(fileProgress);
-    statusLabel = new QLabel(QStringLiteral("选择请求抓包后可按书名搜索；选中书籍或手动填入 ID，再点击“下载并合并”。"), this);
+    statusLabel = new QLabel(QStringLiteral("获取设备会话、账号登录或导入一次抓包后，即可搜索与预览；有效会话会加密复用。"), this);
     statusLabel->setTextFormat(Qt::PlainText);
     statusLabel->setWordWrap(true);
     statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -244,6 +291,39 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
         if (!path.isEmpty())
             capturePath->setText(path);
     });
+    connect(importSessionButton, &QPushButton::clicked, this, [this] {
+        loadAll = false;
+        controller->importCapture(capturePath->text().trimmed());
+    });
+    connect(deviceSessionButton, &QPushButton::clicked, this, &BookDownloadWidget::refreshDeviceSession);
+    connect(accountLoginButton, &QPushButton::clicked, this, &BookDownloadWidget::showAccountLogin);
+    connect(captureSessionButton, &QPushButton::clicked, this, [this] { showMuMuCapture(); });
+    connect(captureCategoryButton, &QPushButton::clicked, this, [this] { showMuMuCapture(true); });
+    connect(renameCategoryButton, &QPushButton::clicked, this, &BookDownloadWidget::renameCurrentCategory);
+    connect(deleteCategoryButton, &QPushButton::clicked, this, &BookDownloadWidget::removeCurrentCategory);
+    connect(controller, &BookDownloadController::categoriesChanged, this, &BookDownloadWidget::updateCategories);
+    connect(categoryCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (index < 0)
+            return;
+        loadAll = false;
+        resultFilter->clear();
+        const auto error = controller->selectCategory(categoryCombo->itemData(index).toString());
+        if (!error.isEmpty())
+            statusLabel->setText(error);
+        else
+            statusLabel->setText(QStringLiteral("已选择分类“%1”；缓存可直接浏览，点击“浏览当前分类”才会按需联网。")
+                                     .arg(controller->currentCategory().name));
+    });
+    connect(forgetSessionButton, &QPushButton::clicked, this, [this] {
+        if (QMessageBox::question(this, QStringLiteral("清除会话"),
+                QStringLiteral("清除本机保存的会话凭证并保留原设备身份？此操作不会注销服务器账号，也不会自动换号。"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
+            loadAll = false;
+            networkConfirmed = false;
+            controller->forgetSession();
+        }
+    });
+    connect(controller, &BookDownloadController::sessionChanged, this, &BookDownloadWidget::updateSessionStatus);
     connect(directoryButton, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getExistingDirectory(this, QStringLiteral("选择 TXT 保存目录"),
                                                           outputDirectory->text());
@@ -328,7 +408,10 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
         updateActions();
     });
     connect(controller, &BookDownloadController::progressChanged, this, [this](int completed, int total) {
-        if (controller->isSearching()) {
+        if (controller->isAuthenticating()) {
+            progress->setRange(0, 0);
+            progress->setFormat(QStringLiteral("正在获取会话…"));
+        } else if (controller->isSearching()) {
             progress->setRange(0, 0);
             progress->setFormat(QStringLiteral("正在读取书籍列表…"));
         } else if (controller->isPreviewing()) {
@@ -352,7 +435,211 @@ BookDownloadWidget::BookDownloadWidget(QWidget *parent)
         if (row >= 0 && !table->item(row, 4)->text().isEmpty())
             QApplication::clipboard()->setText(table->item(row, 4)->text());
     });
+    updateCategories();
     showSearchResults();
+}
+
+bool BookDownloadWidget::hasSessionSource() const
+{
+    return controller->hasSession() || (!controller->hasDeviceIdentity()
+        && QFileInfo(capturePath->text().trimmed()).isFile());
+}
+
+void BookDownloadWidget::updateSessionStatus()
+{
+    sessionLabel->setText(controller->sessionDescription());
+    updateActions();
+}
+
+bool BookDownloadWidget::confirmDeviceIdentity()
+{
+    if (controller->hasDeviceIdentity())
+        return true;
+    return QMessageBox::warning(this, QStringLiteral("建立本机独立身份"),
+        QStringLiteral("当前没有设备身份。是否明确建立一个固定的本机独立身份用于正常会话接口？\n"
+                       "它不是手机上的原账号，可能建立独立游客账户；不会继承手机账号的收藏或权益。\n"
+                       "若要沿用手机身份，请取消并先导入一次自己的请求抓包。失败后不会自动更换身份。"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+}
+
+void BookDownloadWidget::refreshDeviceSession()
+{
+    const bool newIdentity = !controller->hasDeviceIdentity();
+    if (!confirmDeviceIdentity())
+        return;
+    if (controller->isAccountSession()
+        && QMessageBox::warning(this, QStringLiteral("确认设备会话刷新"),
+            QStringLiteral("当前会话来自账号登录或抓包，设备接口返回的身份可能不同。\n"
+                           "如需保持同一账号，请取消并使用账号登录。是否主动获取设备会话？"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+    if (!confirmNetwork())
+        return;
+    loadAll = false;
+    controller->acquireDeviceSession(newIdentity);
+}
+
+void BookDownloadWidget::updateCategories()
+{
+    const QSignalBlocker blocker(categoryCombo);
+    categoryCombo->clear();
+    for (const auto &category : controller->categories())
+        categoryCombo->addItem(QStringLiteral("%1 · %2").arg(category.name, category.tagId), category.key());
+    categoryCombo->setCurrentIndex(categoryCombo->findData(controller->currentCategory().key()));
+    updateActions();
+}
+
+void BookDownloadWidget::renameCurrentCategory()
+{
+    if (controller->isBusy() || categoryCombo->currentIndex() < 0)
+        return;
+    const auto category = controller->currentCategory();
+    QInputDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("重命名小说分类"));
+    dialog.setLabelText(QStringLiteral("请输入分类名称（最多 128 字符）："));
+    dialog.setTextValue(category.name);
+    if (auto *edit = dialog.findChild<QLineEdit *>())
+        edit->setMaxLength(128);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    const auto error = controller->renameCategory(category.key(), dialog.textValue());
+    statusLabel->setText(error.isEmpty()
+        ? QStringLiteral("分类名称已保存为“%1”；原书籍列表和分页缓存保留，未联网。")
+              .arg(controller->currentCategory().name)
+        : error);
+}
+
+void BookDownloadWidget::removeCurrentCategory()
+{
+    if (controller->isBusy() || categoryCombo->currentIndex() < 0)
+        return;
+    const auto category = controller->currentCategory();
+    QMessageBox dialog(QMessageBox::Question, QStringLiteral("删除小说分类"),
+                       QStringLiteral("确定删除分类“%1”（%2）？\n\n仅从分类列表移除，保留书籍列表缓存和已下载 TXT。\n以后重新添加相同分类时可以复用缓存。")
+                           .arg(category.name, category.tagId),
+                       QMessageBox::Yes | QMessageBox::No, this);
+    dialog.setTextFormat(Qt::PlainText);
+    dialog.setDefaultButton(QMessageBox::No);
+    dialog.setEscapeButton(QMessageBox::No);
+    if (dialog.exec() != QMessageBox::Yes)
+        return;
+    const auto error = controller->removeCategory(category.key());
+    if (!error.isEmpty()) {
+        statusLabel->setText(error);
+        return;
+    }
+    loadAll = false;
+    resultFilter->clear();
+    statusLabel->setText(QStringLiteral("已移除分类“%1”，书籍列表缓存和已下载 TXT 保留。\n已选择分类“%2”，未自动联网。")
+                             .arg(category.name, controller->currentCategory().name));
+}
+
+void BookDownloadWidget::showMuMuCapture(bool categoryOnly)
+{
+    if (controller->isBusy())
+        return;
+    loadAll = false;
+    MuMuCaptureDialog dialog(this, categoryOnly);
+    connect(&dialog, &MuMuCaptureDialog::busyChanged, this, [this](bool busy) {
+        emit busyChanged(busy);
+    });
+    connect(&dialog, &MuMuCaptureDialog::requestReady, this, [this, &dialog, categoryOnly](const QByteArray &request) {
+        if (categoryOnly) {
+            NovelCategory category;
+            const auto error = NovelApi::categoryFromRequest(request, category);
+            if (!error.isEmpty()) {
+                dialog.setResultMessage(error);
+                return;
+            }
+            const auto &categories = controller->categories();
+            const auto existing = std::find_if(categories.cbegin(), categories.cend(), [&category](const NovelCategory &item) {
+                return item.key() == category.key();
+            });
+            if (existing != categories.cend()) {
+                dialog.setResultMessage(QStringLiteral("该筛选条件已存在于分类“%1”，未重复添加，也未替换原会话。")
+                                            .arg(existing->name));
+                return;
+            }
+            QInputDialog naming(&dialog);
+            naming.setWindowTitle(QStringLiteral("确认添加小说分类"));
+            naming.setLabelText(QStringLiteral("已捕获分类条件：\n%1\n请填写分类名称（最多 128 字符）：")
+                                    .arg(QString::fromUtf8(QJsonDocument(category.parameters()).toJson(QJsonDocument::Indented))));
+            naming.setTextValue(QStringLiteral("分类 %1").arg(category.tagId));
+            if (auto *edit = naming.findChild<QLineEdit *>())
+                edit->setMaxLength(128);
+            if (naming.exec() != QDialog::Accepted || naming.textValue().trimmed().isEmpty()) {
+                dialog.setResultMessage(QStringLiteral("已取消添加分类，原分类和会话保留。"));
+                return;
+            }
+            category.name = naming.textValue().trimmed();
+            const auto added = controller->addCategory(category);
+            if (!added.isEmpty()) {
+                dialog.setResultMessage(added);
+                return;
+            }
+            networkConfirmed = false;
+            const auto imported = controller->importCapturedRequest(request);
+            dialog.setResultMessage(imported.isEmpty()
+                ? QStringLiteral("已保存并选中分类“%1”。%2\n关闭后点击“浏览当前分类”加载书籍，未自动联网。")
+                      .arg(category.name, controller->sessionDescription())
+                : QStringLiteral("分类“%1”已保存，但会话导入失败，原会话保留：%2").arg(category.name, imported));
+            return;
+        }
+        networkConfirmed = false;
+        const auto error = controller->importCapturedRequest(request);
+        dialog.setImportResult(error, controller->sessionDescription());
+    });
+    dialog.exec();
+    updateSessionStatus();
+}
+
+void BookDownloadWidget::showAccountLogin()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("正常账号登录"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *notice = new QLabel(QStringLiteral(
+        "仅登录你自己的账号，不自动注册。原服务使用 HTTP，Body 加密不等同于 HTTPS；\n"
+        "密码仅用于本次请求，不保存。若服务器要求额外验证，请在 App 中正常完成后导入。"), &dialog);
+    notice->setWordWrap(true);
+    layout->addWidget(notice);
+    auto *form = new QFormLayout;
+    QLineEdit account(&dialog);
+    QLineEdit password(&dialog);
+    account.setObjectName(QStringLiteral("accountLoginNameEdit"));
+    password.setObjectName(QStringLiteral("accountLoginPasswordEdit"));
+    account.setMaxLength(256);
+    password.setMaxLength(256);
+    password.setEchoMode(QLineEdit::Password);
+    form->addRow(QStringLiteral("账号"), &account);
+    form->addRow(QStringLiteral("密码"), &password);
+    layout->addLayout(form);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("登录"));
+    layout->addWidget(buttons);
+    auto updateLogin = [&] {
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(!account.text().trimmed().isEmpty() && !password.text().isEmpty());
+    };
+    connect(&account, &QLineEdit::textChanged, &dialog, updateLogin);
+    connect(&password, &QLineEdit::textChanged, &dialog, updateLogin);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    updateLogin();
+    if (dialog.exec() != QDialog::Accepted) {
+        password.clear();
+        return;
+    }
+    const bool newIdentity = !controller->hasDeviceIdentity();
+    if (!confirmDeviceIdentity() || !confirmNetwork()) {
+        password.clear();
+        return;
+    }
+    auto secret = password.text();
+    password.clear();
+    loadAll = false;
+    controller->loginAccount(account.text().trimmed(), secret, newIdentity);
+    secret.fill(QChar::Null);
+    secret.clear();
 }
 
 void BookDownloadWidget::invalidateSession()
@@ -369,7 +656,7 @@ bool BookDownloadWidget::confirmNetwork()
         return true;
     networkConfirmed = QMessageBox::warning(
         this, QStringLiteral("确认发送会话凭证"),
-        QStringLiteral("搜索书籍、获取目录与章节链接需要将抓包中的会话凭证随加密 Body 发送到：\n"
+        QStringLiteral("获取会话、账号登录、搜索和章节查询会将设备身份及必要凭证随加密 Body 发送到：\n"
                        "http://yj.kkj234ls.com\n\n"
                        "原接口使用 HTTP，不具备 HTTPS 的传输保护；Body 加密不能替代 TLS。\n"
                        "正文从 vgo.pkgplud.cn 的 HTTPS 地址下载，密钥不作为独立参数上传。\n"
@@ -424,7 +711,7 @@ void BookDownloadWidget::showSearchResults()
         searchLabel->setText(QStringLiteral("搜索结果：单击书籍自动填入 ID，不会立即下载。"));
     else
         searchLabel->setText(QStringLiteral("%1 · %2 本 · 读取至第 %3 页 · 更新 %4\n%5")
-                                 .arg(controller->isGroupList() ? QStringLiteral("分类 %1 缓存").arg(NovelApi::groupTagId())
+                                 .arg(controller->isGroupList() ? QStringLiteral("分类“%1”缓存").arg(controller->currentCategory().name)
                                                                 : QStringLiteral("全站搜索（未限定分类）"))
                                  .arg(books.size()).arg(controller->searchPage())
                                  .arg(controller->listUpdatedAt().toLocalTime().toString(QStringLiteral("MM-dd HH:mm")))
@@ -438,7 +725,7 @@ void BookDownloadWidget::showSearchResults()
 void BookDownloadWidget::searchGroupBooks()
 {
     const bool hasCache = controller->hasGroupCache();
-    if (!hasCache && !QFileInfo(capturePath->text().trimmed()).isFile())
+    if (!hasCache && !hasSessionSource())
         return;
     if (!hasCache && !confirmNetwork())
         return;
@@ -446,7 +733,7 @@ void BookDownloadWidget::searchGroupBooks()
     controller->browseGroup(capturePath->text().trimmed());
     resultFilter->setText(keywords->text().trimmed());
     if (!controller->isBusy() && controller->canLoadMoreSearch()
-        && QFileInfo(capturePath->text().trimmed()).isFile() && confirmNetwork()) {
+        && hasSessionSource() && confirmNetwork()) {
         loadAll = true;
         controller->loadMoreSearch();
     } else if (controller->isBusy() && controller->isSearching()) {
@@ -502,7 +789,7 @@ void BookDownloadWidget::showBookDetails()
     loadAll = false;
     const NovelSearchBook selected = *found;
     BookDetailDialog dialog(selected, this);
-    dialog.setPreviewAvailable(QFileInfo(capturePath->text().trimmed()).isFile());
+    dialog.setPreviewAvailable(hasSessionSource());
     connect(controller, &BookDownloadController::previewCatalogReady, &dialog, &BookDetailDialog::setCatalog);
     connect(controller, &BookDownloadController::previewChapterReady, &dialog, &BookDetailDialog::setChapter);
     connect(controller, &BookDownloadController::previewFinished, &dialog, &BookDetailDialog::finishPreview);
@@ -525,18 +812,31 @@ void BookDownloadWidget::updateActions()
 {
     const bool busy = controller->isBusy();
     const bool hasBook = !controller->book().chapters.isEmpty();
-    const bool hasCapture = QFileInfo(capturePath->text().trimmed()).isFile();
-    const bool validInput = NovelApi::isId(bookId->text().trimmed()) && hasCapture;
+    const bool hasSession = hasSessionSource();
+    importSessionButton->setEnabled(!busy && QFileInfo(capturePath->text().trimmed()).isFile());
+    deviceSessionButton->setEnabled(!busy);
+    accountLoginButton->setEnabled(!busy);
+    captureSessionButton->setEnabled(!busy);
+    categoryCombo->setEnabled(!busy);
+    captureCategoryButton->setEnabled(!busy);
+    const bool hasCategory = categoryCombo->currentIndex() >= 0;
+    renameCategoryButton->setEnabled(!busy && hasCategory);
+    deleteCategoryButton->setEnabled(!busy && hasCategory && controller->categories().size() > 1);
+    deleteCategoryButton->setToolTip(controller->categories().size() > 1
+        ? QStringLiteral("仅移除分类，保留书籍列表缓存和已下载 TXT。")
+        : QStringLiteral("至少保留一个小说分类；添加其他分类后可删除。"));
+    forgetSessionButton->setEnabled(!busy && controller->hasDeviceIdentity());
+    const bool validInput = NovelApi::isId(bookId->text().trimmed()) && hasSession;
     const bool validKeywords = NovelApi::isSearchKeywords(keywords->text().trimmed());
-    searchButton->setEnabled(!busy && (hasCapture || controller->hasGroupCache()) && validKeywords);
-    globalSearchButton->setEnabled(!busy && hasCapture && validKeywords);
-    groupButton->setEnabled(!busy && (hasCapture || controller->hasGroupCache()));
-    refreshGroupButton->setEnabled(!busy && hasCapture);
+    searchButton->setEnabled(!busy && (hasSession || controller->hasGroupCache()) && validKeywords);
+    globalSearchButton->setEnabled(!busy && hasSession && validKeywords);
+    groupButton->setEnabled(!busy && (hasSession || controller->hasGroupCache()));
+    refreshGroupButton->setEnabled(!busy && hasSession);
     allButton->setText(loadAll ? QStringLiteral("停止加载") : QStringLiteral("加载全部"));
-    allButton->setEnabled(loadAll || (!busy && hasCapture && controller->canLoadMoreSearch()));
+    allButton->setEnabled(loadAll || (!busy && hasSession && controller->canLoadMoreSearch()));
     resultFilter->setEnabled(!busy);
     detailButton->setEnabled(!busy && !searchTable->selectedItems().isEmpty());
-    moreSearchButton->setEnabled(!busy && hasCapture && controller->canLoadMoreSearch());
+    moreSearchButton->setEnabled(!busy && hasSession && controller->canLoadMoreSearch());
     catalogButton->setEnabled(!busy && validInput);
     linksButton->setEnabled(!busy && hasBook);
     downloadButton->setEnabled(!busy && validInput && QFileInfo(outputDirectory->text().trimmed()).isDir());

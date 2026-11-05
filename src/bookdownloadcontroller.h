@@ -20,13 +20,29 @@ public:
     bool isBusy() const { return mode != Mode::Idle; }
     bool isSearching() const { return mode == Mode::Search; }
     bool isPreviewing() const { return mode == Mode::PreviewCatalog || mode == Mode::Preview; }
+    bool isAuthenticating() const { return mode == Mode::Authentication; }
+    bool hasSession() const { return api->hasSession(); }
+    bool hasDeviceIdentity() const { return !api->sessionProfile().deviceId.isEmpty(); }
+    bool isAccountSession() const { return api->sessionProfile().accountSession; }
+    QString sessionDescription() const;
+    void importCapture(const QString &capturePath);
+    QString importCapturedRequest(const QByteArray &raw);
+    void acquireDeviceSession(bool allowNewIdentity = false);
+    void loginAccount(const QString &account, const QString &password, bool allowNewIdentity = false);
+    void forgetSession();
     const NovelBook &book() const { return currentBook; }
     const QVector<NovelSearchBook> &searchResults() const { return activeList().books; }
     int searchPage() const { return activeList().page; }
     bool canLoadMoreSearch() const { return activeList().hasMore; }
     bool searchComplete() const { return activeList().complete; }
     bool isGroupList() const { return groupActive; }
-    bool hasGroupCache() const { return groupList.page > 0; }
+    bool hasGroupCache() const { return groupList().page > 0; }
+    const QVector<NovelCategory> &categories() const { return categoryList; }
+    const NovelCategory &currentCategory() const { return category; }
+    QString selectCategory(const QString &key);
+    QString addCategory(const NovelCategory &value);
+    QString renameCategory(const QString &key, const QString &name);
+    QString removeCategory(const QString &key);
     QDateTime listUpdatedAt() const { return activeList().updatedAt; }
     void invalidate(const QString &capturePath);
     void invalidateBook();
@@ -43,9 +59,11 @@ public:
 signals:
     void bookChanged(const NovelBook &book);
     void searchResultsChanged();
+    void categoriesChanged();
     void previewCatalogReady(const NovelBook &book);
     void previewChapterReady(int index, const QString &text, const QString &status);
     void previewFinished(const QString &message);
+    void sessionChanged();
     void chapterChanged(int index, const QUrl &content, const QString &status);
     void busyChanged(bool busy);
     void statusChanged(const QString &message);
@@ -53,10 +71,15 @@ signals:
     void downloadProgress(qint64 received, qint64 total);
 
 private:
-    enum class Mode { Idle, Catalog, Links, Download, Merge, Search, PreviewCatalog, Preview };
-    BookListSnapshot &activeList() { return groupActive ? groupList : keywordList; }
-    const BookListSnapshot &activeList() const { return groupActive ? groupList : keywordList; }
+    enum class Mode { Idle, Catalog, Links, Download, Merge, Search, PreviewCatalog, Preview, Authentication };
+    BookListSnapshot &groupList() { return groupLists[category.key()]; }
+    const BookListSnapshot &groupList() const { return groupLists.constFind(category.key()).value(); }
+    BookListSnapshot &activeList() { return groupActive ? groupList() : keywordList; }
+    const BookListSnapshot &activeList() const { return groupActive ? groupList() : keywordList; }
     void setMode(Mode value);
+    QString saveCategoryList(const QVector<NovelCategory> &updated) const;
+    QString ensureSession(const QString &capturePath);
+    void clearBookSessionState();
     void requestBook(const QString &id, const QString &capturePath, const QString &directory);
     void startDownload(const QString &directory);
     void startMerge();
@@ -77,12 +100,15 @@ private:
     NovelBook currentBook;
     NovelBook previewBookData;
     int previewIndex = 0;
-    BookListSnapshot groupList;
+    QVector<NovelCategory> categoryList{NovelCategory::defaultCategory()};
+    NovelCategory category = NovelCategory::defaultCategory();
+    QMap<QString, BookListSnapshot> groupLists;
     BookListSnapshot keywordList;
     bool groupActive = true;
     QString searchKeywords;
     QString listCapturePath;
     QString cacheWarning;
+    QString sessionWarning;
     Mode mode = Mode::Idle;
     int current = 0;
     int saved = 0;
