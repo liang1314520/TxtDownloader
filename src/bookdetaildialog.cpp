@@ -1,64 +1,76 @@
 #include "bookdetaildialog.h"
+#include "workbenchtheme.h"
 
 #include <QComboBox>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 BookDetailDialog::BookDetailDialog(const NovelSearchBook &book, QWidget *parent)
     : QDialog(parent)
 {
-    setWindowTitle(QStringLiteral("书籍详情"));
-    resize(760, 700);
-    setMinimumSize(550, 500);
+    setWindowTitle(QStringLiteral("书籍详情与正文预览"));
+    setStyleSheet(WorkbenchTheme::styleSheet());
+    resize(820, 780);
+    setMinimumSize(620, 560);
     auto *layout = new QVBoxLayout(this);
-    auto *title = new QLabel(book.name, this);
-    title->setTextFormat(Qt::PlainText);
-    title->setWordWrap(true);
-    auto font = title->font();
-    font.setPointSize(font.pointSize() + 3);
-    font.setBold(true);
-    title->setFont(font);
-    layout->addWidget(title);
-    auto *metadata = new QLabel(QStringLiteral("作者：%1    章节数：%2    状态：%3")
-                                   .arg(book.author.isEmpty() ? QStringLiteral("未提供") : book.author,
-                                        book.chapterCount.isEmpty() ? QStringLiteral("未提供") : book.chapterCount,
-                                        book.status), this);
-    metadata->setTextFormat(Qt::PlainText);
-    metadata->setWordWrap(true);
-    layout->addWidget(metadata);
-    layout->addWidget(new QLabel(QStringLiteral("书籍简介"), this));
-    descriptionView = new QPlainTextEdit(this);
+    layout->setContentsMargins(24, 24, 24, 20);
+    layout->setSpacing(14);
+    layout->addWidget(WorkbenchTheme::label(QStringLiteral("A FEW PAGES FIRST / 书籍详情"), "eyebrow", this));
+    layout->addWidget(WorkbenchTheme::label(book.name, "pageTitle", this));
+    layout->addWidget(WorkbenchTheme::label(QStringLiteral("作者：%1    章节数：%2    状态：%3")
+        .arg(book.author.isEmpty() ? QStringLiteral("未提供") : book.author,
+             book.chapterCount.isEmpty() ? QStringLiteral("未提供") : book.chapterCount,
+             book.status), "muted", this));
+    auto *descriptionCard = WorkbenchTheme::panel(this);
+    auto *descriptionLayout = new QVBoxLayout(descriptionCard);
+    descriptionLayout->setContentsMargins(16, 14, 16, 14);
+    descriptionLayout->addWidget(WorkbenchTheme::label(QStringLiteral("书籍简介"), "sectionTitle", descriptionCard));
+    descriptionView = new QPlainTextEdit(descriptionCard);
     descriptionView->setObjectName(QStringLiteral("bookDescriptionView"));
     descriptionView->setReadOnly(true);
     descriptionView->setPlainText(book.description.trimmed().isEmpty() ? QStringLiteral("暂无简介") : book.description);
-    descriptionView->setMaximumHeight(180);
-    layout->addWidget(descriptionView);
+    descriptionView->document()->setDocumentMargin(12);
+    descriptionView->setMaximumHeight(130);
+    descriptionLayout->addWidget(descriptionView);
+    layout->addWidget(descriptionCard);
+    auto *readingCard = WorkbenchTheme::panel(this);
+    auto *readingLayout = new QVBoxLayout(readingCard);
+    readingLayout->setContentsMargins(16, 16, 16, 16);
+    readingLayout->setSpacing(12);
+    readingLayout->addWidget(WorkbenchTheme::label(QStringLiteral("正文预览 / 前三章"), "sectionTitle", readingCard));
     auto *row = new QHBoxLayout;
-    loadButton = new QPushButton(QStringLiteral("加载前三章"), this);
+    loadButton = new QPushButton(QStringLiteral("加载前三章"), readingCard);
     loadButton->setObjectName(QStringLiteral("loadChapterPreviewButton"));
-    cancelButton = new QPushButton(QStringLiteral("停止预览加载"), this);
+    loadButton->setProperty("primary", true);
+    cancelButton = new QPushButton(QStringLiteral("停止预览加载"), readingCard);
     cancelButton->setEnabled(false);
-    chapterChoice = new QComboBox(this);
+    chapterChoice = new QComboBox(readingCard);
     chapterChoice->setObjectName(QStringLiteral("previewChapterCombo"));
+    chapterChoice->setMinimumContentsLength(8);
+    chapterChoice->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     row->addWidget(loadButton);
     row->addWidget(cancelButton);
     row->addWidget(chapterChoice, 1);
-    layout->addLayout(row);
-    previewView = new QPlainTextEdit(this);
+    readingLayout->addLayout(row);
+    previewView = new QPlainTextEdit(readingCard);
     previewView->setObjectName(QStringLiteral("chapterPreviewView"));
     previewView->setReadOnly(true);
-    previewView->setPlaceholderText(QStringLiteral("按需加载目录中的前三章；仅处理当前会话免费且有权阅读的内容。"));
-    layout->addWidget(previewView, 1);
-    messageLabel = new QLabel(QStringLiteral("正文仅在本弹窗内保留，不自动生成 TXT；关闭后释放。"), this);
-    messageLabel->setTextFormat(Qt::PlainText);
-    messageLabel->setWordWrap(true);
-    layout->addWidget(messageLabel);
+    previewView->document()->setDocumentMargin(20);
+    previewView->setPlaceholderText(QStringLiteral("点击“加载前三章”后才联网。仅处理当前会话免费且有权阅读的内容。"));
+    readingLayout->addWidget(previewView, 1);
+    layout->addWidget(readingCard, 1);
+    auto *footer = new QHBoxLayout;
+    messageLabel = WorkbenchTheme::label(QStringLiteral("正文仅在本弹窗内保留，不自动生成 TXT；关闭后释放。"), "status", this);
+    footer->addWidget(messageLabel, 1);
     auto *closeButton = new QPushButton(QStringLiteral("关闭"), this);
-    layout->addWidget(closeButton, 0, Qt::AlignRight);
+    footer->addWidget(closeButton, 0, Qt::AlignTop);
+    layout->addLayout(footer);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::reject);
     connect(chapterChoice, &QComboBox::currentIndexChanged, this, &BookDetailDialog::showChapter);
     connect(cancelButton, &QPushButton::clicked, this, [this] {

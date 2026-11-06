@@ -8,19 +8,38 @@ class QLabel;
 class QLineEdit;
 class QProgressBar;
 class QPushButton;
+class QPlainTextEdit;
+class QStackedWidget;
 class QTableWidget;
 struct NovelBook;
+struct NovelSearchBook;
 
 class BookDownloadWidget : public QWidget {
     Q_OBJECT
 
 public:
+    enum class Page { Library, Download, Session, Favorites };
+
     explicit BookDownloadWidget(QWidget *parent = nullptr);
+    void setPage(Page page);
 
 signals:
     void busyChanged(bool busy);
+    void downloadPageRequested();
 
 private:
+    void buildLibraryPage();
+    void buildDownloadPage();
+    void buildSessionPage();
+    void buildFavoritesPage();
+    const NovelSearchBook *selectedSearchBook() const;
+    const NovelSearchBook *selectedFavoriteBook() const;
+    void updateSelectedBook();
+    void updateSelectedFavorite();
+    void showFavorites();
+    void applyFavoritesFilter();
+    void updateFavoriteMarkers();
+    void changeFavorite(const NovelSearchBook &book, bool favorite);
     void updateActions();
     void showBook(const NovelBook &book);
     void showSearchResults();
@@ -28,11 +47,13 @@ private:
     void searchGroupBooks();
     void selectSearchBook();
     void showBookDetails();
+    void showBookDetailsFor(const NovelSearchBook &book);
     void showAccountLogin();
     void showMuMuCapture(bool categoryOnly = false);
     void updateCategories();
     void renameCurrentCategory();
     void removeCurrentCategory();
+    void reorderCurrentCategories();
     void refreshDeviceSession();
     void updateSessionStatus();
     void invalidateSession();
@@ -41,7 +62,28 @@ private:
     bool hasSessionSource() const;
 
     BookDownloadController *controller;
-    QWidget *settings;
+    QStackedWidget *pages;
+    QWidget *downloadSettings;
+    QWidget *sessionSettings;
+    QPushButton *captureFileButton;
+    QPushButton *directoryButton;
+    QPushButton *openDownloadButton;
+    QLabel *selectedTitle;
+    QLabel *selectedMetadata;
+    QLabel *selectedId;
+    QPlainTextEdit *selectedDescription;
+    QLabel *catalogMetric;
+    QLabel *completedMetric;
+    QTableWidget *favoritesTable;
+    QLineEdit *favoritesFilter;
+    QLabel *favoritesSummary;
+    QLabel *favoriteTitle;
+    QLabel *favoriteMetadata;
+    QLabel *favoriteId;
+    QPlainTextEdit *favoriteDescription;
+    QPushButton *removeFavoriteButton;
+    QPushButton *favoriteDetailButton;
+    QPushButton *favoriteDownloadButton;
     QLineEdit *bookId;
     QLineEdit *keywords;
     QLineEdit *capturePath;
@@ -75,6 +117,7 @@ private:
     QPushButton *captureCategoryButton;
     QPushButton *renameCategoryButton;
     QPushButton *deleteCategoryButton;
+    QPushButton *reorderCategoriesButton;
     QPushButton *groupButton;
     QPushButton *refreshGroupButton;
     QPushButton *allButton;

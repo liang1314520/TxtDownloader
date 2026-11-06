@@ -41,6 +41,7 @@ target_compile_definitions(novdecoder_network PRIVATE WIN32_LEAN_AND_MEAN NOMINM
 target_link_libraries(novdecoder_network PUBLIC novdecoder_core Qt6::Network PRIVATE crypt32)
 
 add_library(novdecoder_widgets STATIC
+    src/workbenchtheme.cpp src/workbenchtheme.h
     src/mainwindow.cpp src/mainwindow.h
     src/bookdownloadwidget.cpp src/bookdownloadwidget.h
     src/bookdetaildialog.cpp src/bookdetaildialog.h

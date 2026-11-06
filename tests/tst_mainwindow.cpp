@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "booklistcache.h"
 #include "bookdownloadcontroller.h"
+#include "bookdownloadwidget.h"
 #include "bookdetaildialog.h"
 #include "sessionprofile.h"
 #include "pcaprequestreader.h"
@@ -20,10 +21,17 @@
 
 #include <QComboBox>
 #include <QInputDialog>
+#include <QDialogButtonBox>
+#include <QHeaderView>
+#include <QListWidget>
 #include <QMap>
 #include <QPlainTextEdit>
 #include <QStandardPaths>
+#include <QStackedWidget>
 #include <QScopeGuard>
+#include <QLockFile>
+#include <QStyle>
+#include <QStyleOptionViewItem>
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -61,6 +69,31 @@ QByteArray readFile(const QString &path)
     if (!file.open(QIODevice::ReadOnly))
         return {};
     return file.readAll();
+}
+
+auto preserveFavoriteFile()
+{
+    const auto path = BookListCache::favoritesPath();
+    const bool existed = QFile::exists(path);
+    const auto previous = readFile(path);
+    return qScopeGuard([path, existed, previous] {
+        if (existed)
+            writeFile(path, previous);
+        else
+            QFile::remove(path);
+    });
+}
+
+NovelSearchBook favoriteSample(QChar digit = QLatin1Char('a'))
+{
+    NovelSearchBook book;
+    book.id = QString(32, digit);
+    book.name = QStringLiteral("<b>收藏书名</b>");
+    book.author = QStringLiteral("<i>合成作者</i>");
+    book.chapterCount = QStringLiteral("37");
+    book.status = QStringLiteral("已完结");
+    book.description = QStringLiteral("<img src=x>\n只保存合成简介，不加载外部内容。");
+    return book;
 }
 
 auto preserveCategoryFiles(const QVector<NovelCategory> &categories)
@@ -145,6 +178,21 @@ private slots:
     void preservesCategoriesWhenManagementCannotSave_data();
     void preservesCategoriesWhenManagementCannotSave();
     void categoryManagementDialogsPreserveState();
+    void navigatesWorkbenchWithoutStartingTasks();
+    void selectedBookSidebarUsesPlainText();
+    void workbenchNavigationPreservesTaskExclusion();
+    void persistsFavoritesWithoutCredentials();
+    void rejectsInvalidFavorites_data();
+    void rejectsInvalidFavorites();
+    void preservesFavoritesWhenSaveFails_data();
+    void preservesFavoritesWhenSaveFails();
+    void favoritesSurviveCategoryAndSessionChanges();
+    void reordersCategoriesWithoutDiscardingCache();
+    void categoryOrderDialogSavesOnlyWhenAccepted();
+    void favoritesWorkAcrossLibraryAndSavedPage();
+    void favoriteMarkerRollsBackWhenSaveFails();
+    void favoriteControllersMergeCurrentDiskState();
+    void favoriteUpdateRespectsAnotherWriterLock();
 };
 
 void MainWindowTest::startsWithDisabledAction()
@@ -412,6 +460,42 @@ void MainWindowTest::normalizesCatalogBeforePreview_data()
                        QStringLiteral("第272-273章"), QStringLiteral("第270-271章")}
         << QStringList{QStringLiteral("第270-271章"), QStringLiteral("第272-273章"),
                        QStringLiteral("第274-275章"), QStringLiteral("第276-277章")};
+    QTest::newRow("descending-chapters-after-volume-and-ending")
+        << QStringList{QStringLiteral("第三卷 第三结局_第400章"), QStringLiteral("第三卷 第三结局_第196章"),
+                       QStringLiteral("第二卷 第二结局_第195章"), QStringLiteral("第二卷 第二结局_第181章"),
+                       QStringLiteral("第三卷 第三结局_第180章"), QStringLiteral("第三卷 第三结局_第169章"),
+                       QStringLiteral("第一卷_第168章"), QStringLiteral("第一卷_第2章 合成标题乙"),
+                       QStringLiteral("第一卷_第1章 合成标题甲")}
+        << QStringList{QStringLiteral("第一卷_第1章 合成标题甲"), QStringLiteral("第一卷_第2章 合成标题乙"),
+                       QStringLiteral("第一卷_第168章"), QStringLiteral("第三卷 第三结局_第169章"),
+                       QStringLiteral("第三卷 第三结局_第180章"), QStringLiteral("第二卷 第二结局_第181章"),
+                       QStringLiteral("第二卷 第二结局_第195章"), QStringLiteral("第三卷 第三结局_第196章"),
+                       QStringLiteral("第三卷 第三结局_第400章")};
+    QTest::newRow("descending-chinese-chapters-after-volume")
+        << QStringList{QStringLiteral("第一卷_第三章"), QStringLiteral("第一卷_第二章"),
+                       QStringLiteral("第一卷_第一章")}
+        << QStringList{QStringLiteral("第一卷_第一章"), QStringLiteral("第一卷_第二章"),
+                       QStringLiteral("第一卷_第三章")};
+    QTest::newRow("descending-chapter-ranges-after-volume")
+        << QStringList{QStringLiteral("第一卷_第276-277章"), QStringLiteral("第一卷_第274-275章"),
+                       QStringLiteral("第一卷_第272-273章")}
+        << QStringList{QStringLiteral("第一卷_第272-273章"), QStringLiteral("第一卷_第274-275章"),
+                       QStringLiteral("第一卷_第276-277章")};
+    QTest::newRow("descending-sections-after-volume")
+        << QStringList{QStringLiteral("第一卷_第3节"), QStringLiteral("第一卷_第2节"), QStringLiteral("第一卷_第1节")}
+        << QStringList{QStringLiteral("第一卷_第1节"), QStringLiteral("第一卷_第2节"), QStringLiteral("第一卷_第3节")};
+    QTest::newRow("descending-hui-after-volume")
+        << QStringList{QStringLiteral("第一卷_第三回"), QStringLiteral("第一卷_第二回"), QStringLiteral("第一卷_第一回")}
+        << QStringList{QStringLiteral("第一卷_第一回"), QStringLiteral("第一卷_第二回"), QStringLiteral("第一卷_第三回")};
+    const QStringList prefixedAscending{QStringLiteral("第三卷_第1章"), QStringLiteral("第二卷_第2章"),
+                                        QStringLiteral("第一卷_第3章")};
+    QTest::newRow("ascending-chapters-override-descending-volume-numbers")
+        << prefixedAscending << prefixedAscending;
+    const QStringList volumeHeadings{QStringLiteral("第三卷"), QStringLiteral("第二卷"), QStringLiteral("第一卷")};
+    QTest::newRow("volume-numbers-alone-are-not-chapter-numbers") << volumeHeadings << volumeHeadings;
+    const QStringList prefixedVolumeReset{QStringLiteral("第一卷_第1章"), QStringLiteral("第一卷_第2章"),
+                                          QStringLiteral("第二卷_第1章"), QStringLiteral("第二卷_第2章")};
+    QTest::newRow("prefixed-volume-number-reset-is-preserved") << prefixedVolumeReset << prefixedVolumeReset;
     const QStringList ascending{QStringLiteral("序章"), QStringLiteral("第1章"), QStringLiteral("第2章"),
                                 QStringLiteral("第3章"), QStringLiteral("尾声")};
     QTest::newRow("already-ascending") << ascending << ascending;
@@ -1591,7 +1675,7 @@ void MainWindowTest::categoryManagementDialogsPreserveState()
     QVERIFY(combo->currentText().contains(QStringLiteral("<b>新分类名</b>")));
     QCOMPARE(filter->text(), book.name);
     QCOMPARE(bookId->text(), book.id);
-    QCOMPARE(table->selectedItems().size(), 5);
+    QCOMPARE(table->selectedItems().size(), 6);
     QCOMPARE(controller->searchPage(), 2);
     QCOMPARE(readFile(cache), cachedBytes);
     QVERIFY(!remove->isEnabled());
@@ -1631,6 +1715,697 @@ void MainWindowTest::categoryManagementDialogsPreserveState()
     QVERIFY(filter->text().isEmpty());
     QCOMPARE(readFile(cache), cachedBytes);
     QVERIFY(!controller->isBusy());
+}
+
+void MainWindowTest::navigatesWorkbenchWithoutStartingTasks()
+{
+    MainWindow window;
+    auto *workspace = window.findChild<QStackedWidget *>(QStringLiteral("workspaceStack"));
+    auto *bookPages = window.findChild<QStackedWidget *>(QStringLiteral("bookWorkspaceStack"));
+    auto *library = window.findChild<QPushButton *>(QStringLiteral("libraryNavigationButton"));
+    auto *download = window.findChild<QPushButton *>(QStringLiteral("downloadNavigationButton"));
+    auto *convert = window.findChild<QPushButton *>(QStringLiteral("convertNavigationButton"));
+    auto *session = window.findChild<QPushButton *>(QStringLiteral("sessionNavigationButton"));
+    auto *favorites = window.findChild<QPushButton *>(QStringLiteral("favoritesNavigationButton"));
+    auto *bookId = window.findChild<QLineEdit *>(QStringLiteral("bookIdEdit"));
+    auto *input = window.findChild<QLineEdit *>(QStringLiteral("inputPathEdit"));
+    auto *key = window.findChild<QLineEdit *>(QStringLiteral("keyEdit"));
+    auto *controller = window.findChild<BookDownloadController *>();
+    QVERIFY(workspace && bookPages && library && favorites && download && convert && session && bookId && input && key && controller);
+    QCOMPARE(window.findChildren<BookDownloadController *>().size(), 1);
+    QSignalSpy busy(controller, &BookDownloadController::busyChanged);
+    QSignalSpy bookChanges(controller, &BookDownloadController::bookChanged);
+    QCOMPARE(workspace->currentIndex(), 0);
+    QCOMPARE(bookPages->currentIndex(), 0);
+    QVERIFY(library->isChecked());
+    bookId->setText(QString(32, QLatin1Char('a')));
+    input->setText(QStringLiteral("E:/synthetic/chapter.nov"));
+    key->setText(QStringLiteral("0123456789abcdef"));
+    bookChanges.clear();
+    favorites->click();
+    QCOMPARE(workspace->currentIndex(), 0);
+    QCOMPARE(bookPages->currentIndex(), 3);
+    QVERIFY(favorites->isChecked());
+    download->click();
+    QCOMPARE(workspace->currentIndex(), 0);
+    QCOMPARE(bookPages->currentIndex(), 1);
+    session->click();
+    QCOMPARE(bookPages->currentIndex(), 2);
+    convert->click();
+    QCOMPARE(workspace->currentIndex(), 1);
+    library->click();
+    QCOMPARE(workspace->currentIndex(), 0);
+    QCOMPARE(bookPages->currentIndex(), 0);
+    QCOMPARE(bookId->text(), QString(32, QLatin1Char('a')));
+    QCOMPARE(input->text(), QStringLiteral("E:/synthetic/chapter.nov"));
+    QCOMPARE(key->text(), QStringLiteral("0123456789abcdef"));
+    QCOMPARE(busy.count(), 0);
+    QCOMPARE(bookChanges.count(), 0);
+    QVERIFY(!controller->isBusy());
+}
+
+void MainWindowTest::selectedBookSidebarUsesPlainText()
+{
+    const auto category = NovelCategory::defaultCategory();
+    const auto restore = preserveCategoryFiles({category});
+    QVERIFY(BookListCache::saveCategories(BookListCache::categoriesPath(), {category}).isEmpty());
+    BookListSnapshot snapshot;
+    snapshot.page = 1;
+    snapshot.complete = true;
+    snapshot.updatedAt = QDateTime::currentDateTimeUtc();
+    NovelSearchBook book;
+    book.id = QString(32, QLatin1Char('d'));
+    book.name = QStringLiteral("<b>合成书名</b>");
+    book.author = QStringLiteral("<i>合成作者</i>");
+    book.chapterCount = QStringLiteral("27");
+    book.status = QStringLiteral("已完结");
+    book.description = QStringLiteral("<img src=x>\n纯文本简介，不加载外部资源。");
+    snapshot.books.append(book);
+    QVERIFY(BookListCache::save(BookListCache::defaultPath(category), snapshot, category).isEmpty());
+    MainWindow window;
+    auto *controller = window.findChild<BookDownloadController *>();
+    auto *table = window.findChild<QTableWidget *>(QStringLiteral("bookSearchResultsTable"));
+    auto *title = window.findChild<QLabel *>(QStringLiteral("selectedBookTitleLabel"));
+    auto *description = window.findChild<QPlainTextEdit *>(QStringLiteral("bookSelectedDescriptionView"));
+    auto *id = window.findChild<QLineEdit *>(QStringLiteral("bookIdEdit"));
+    auto *filter = window.findChild<QLineEdit *>(QStringLiteral("bookResultFilterEdit"));
+    auto *open = window.findChild<QPushButton *>(QStringLiteral("openBookDownloadButton"));
+    auto *preview = window.findChild<QPushButton *>(QStringLiteral("bookDetailsButton"));
+    auto *pages = window.findChild<QStackedWidget *>(QStringLiteral("bookWorkspaceStack"));
+    auto *library = window.findChild<QPushButton *>(QStringLiteral("libraryNavigationButton"));
+    QVERIFY(controller && table && title && description && id && filter && open && preview && pages && library);
+    QSignalSpy busy(controller, &BookDownloadController::busyChanged);
+    QVERIFY(!open->isEnabled());
+    QVERIFY(!preview->isEnabled());
+    QCOMPARE(table->rowCount(), 1);
+    QVERIFY(table->maximumHeight() > 200);
+    table->selectRow(0);
+    QCOMPARE(title->textFormat(), Qt::PlainText);
+    QCOMPARE(title->text(), book.name);
+    QCOMPARE(description->toPlainText(), book.description);
+    QCOMPARE(id->text(), book.id);
+    QVERIFY(open->isEnabled());
+    id->setText(QString(32, QLatin1Char('e')));
+    open->click();
+    QCOMPARE(pages->currentIndex(), 1);
+    QCOMPARE(id->text(), book.id);
+    library->click();
+    QCOMPARE(table->selectedItems().size(), 6);
+    QCOMPARE(title->text(), book.name);
+    filter->setText(QStringLiteral("没有匹配的书名"));
+    QVERIFY(table->isRowHidden(0));
+    QCOMPARE(title->text(), QStringLiteral("请选择书籍"));
+    QVERIFY(description->toPlainText().isEmpty());
+    QVERIFY(!open->isEnabled());
+    QVERIFY(!preview->isEnabled());
+    QCOMPARE(busy.count(), 0);
+    QVERIFY(!controller->isBusy());
+}
+
+void MainWindowTest::workbenchNavigationPreservesTaskExclusion()
+{
+    MainWindow window;
+    auto *bookWidget = window.findChild<BookDownloadWidget *>();
+    auto *convert = window.findChild<QPushButton *>(QStringLiteral("convertNavigationButton"));
+    auto *library = window.findChild<QPushButton *>(QStringLiteral("libraryNavigationButton"));
+    auto *download = window.findChild<QPushButton *>(QStringLiteral("downloadNavigationButton"));
+    auto *session = window.findChild<QPushButton *>(QStringLiteral("sessionNavigationButton"));
+    auto *workspace = window.findChild<QStackedWidget *>(QStringLiteral("workspaceStack"));
+    auto *controller = window.findChild<BookDownloadController *>();
+    auto *favorites = window.findChild<QPushButton *>(QStringLiteral("favoritesNavigationButton"));
+    QVERIFY(bookWidget && convert && library && favorites && download && session && workspace && controller);
+    QVERIFY(QMetaObject::invokeMethod(bookWidget, "busyChanged", Qt::DirectConnection, Q_ARG(bool, true)));
+    QVERIFY(!convert->isEnabled());
+    QVERIFY(library->isEnabled() && favorites->isEnabled() && download->isEnabled() && session->isEnabled());
+    convert->click();
+    QCOMPARE(workspace->currentIndex(), 0);
+    QVERIFY(QMetaObject::invokeMethod(bookWidget, "busyChanged", Qt::DirectConnection, Q_ARG(bool, false)));
+    QVERIFY(convert->isEnabled());
+    convert->click();
+    QCOMPARE(workspace->currentIndex(), 1);
+    QVERIFY(!controller->isBusy());
+}
+
+void MainWindowTest::persistsFavoritesWithoutCredentials()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto path = dir.filePath(QStringLiteral("favorites.json"));
+    auto first = favoriteSample();
+    first.id = first.id.toUpper();
+    const auto second = favoriteSample(QLatin1Char('b'));
+    QVERIFY(BookListCache::saveFavorites(path, {second, first}).isEmpty());
+    const auto object = QJsonDocument::fromJson(readFile(path)).object();
+    QCOMPARE(object.size(), 2);
+    QCOMPARE(object.value(QStringLiteral("version")).toInt(), 1);
+    const auto entries = object.value(QStringLiteral("books")).toArray();
+    QCOMPARE(entries.size(), 2);
+    QCOMPARE(entries.first().toObject().size(), 6);
+    QVERIFY(!object.contains(QStringLiteral("token")));
+    QVERIFY(!object.contains(QStringLiteral("deviceId")));
+    QVERIFY(!entries.first().toObject().contains(QStringLiteral("content")));
+    QVector<NovelSearchBook> loaded;
+    QVERIFY(BookListCache::loadFavorites(path, loaded).isEmpty());
+    QCOMPARE(loaded.size(), 2);
+    QCOMPARE(loaded.first().id, second.id);
+    QCOMPARE(loaded.last().id, first.id.toLower());
+    QCOMPARE(loaded.last().description, first.description);
+    QCOMPARE(loaded.last().author, first.author);
+    QVERIFY(BookListCache::saveFavorites(path, {}).isEmpty());
+    QVERIFY(BookListCache::loadFavorites(path, loaded).isEmpty());
+    QVERIFY(loaded.isEmpty());
+    loaded.append(first);
+    QVERIFY(BookListCache::loadFavorites(dir.filePath(QStringLiteral("missing.json")), loaded).isEmpty());
+    QVERIFY(loaded.isEmpty());
+}
+
+void MainWindowTest::rejectsInvalidFavorites_data()
+{
+    QTest::addColumn<QString>("invalid");
+    for (const auto *name : {"id", "duplicate", "blank-name", "control-name", "long-author", "long-description",
+                             "count", "total-size", "corrupt", "version", "unsafe-file", "linked-file", "linked-parent"})
+        QTest::newRow(name) << QString::fromLatin1(name);
+}
+
+void MainWindowTest::rejectsInvalidFavorites()
+{
+    QFETCH(QString, invalid);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto path = dir.filePath(QStringLiteral("favorites.json"));
+    const auto book = favoriteSample();
+    QVERIFY(BookListCache::saveFavorites(path, {book}).isEmpty());
+    const auto original = readFile(path);
+    QVector<NovelSearchBook> loaded{book};
+    QVector<NovelSearchBook> changed{book};
+    if (invalid == QStringLiteral("corrupt") || invalid == QStringLiteral("version")) {
+        if (invalid == QStringLiteral("corrupt")) {
+            QVERIFY(writeFile(path, "{broken-favorites"));
+        } else {
+            auto object = QJsonDocument::fromJson(original).object();
+            object.insert(QStringLiteral("version"), 1.5);
+            QVERIFY(writeFile(path, QJsonDocument(object).toJson()));
+        }
+        const auto previous = readFile(path);
+        QVERIFY(!BookListCache::loadFavorites(path, loaded).isEmpty());
+        QVERIFY(!BookListCache::saveFavorites(path, {}).isEmpty());
+        QCOMPARE(readFile(path), previous);
+        QCOMPARE(loaded.first().id, book.id);
+        return;
+    }
+    if (invalid == QStringLiteral("unsafe-file") || invalid == QStringLiteral("linked-file")
+        || invalid == QStringLiteral("linked-parent")) {
+        QString unsafe;
+        if (invalid == QStringLiteral("unsafe-file")) {
+            unsafe = dir.filePath(QStringLiteral("directory"));
+            QVERIFY(QDir().mkpath(unsafe));
+        } else {
+            const auto link = dir.filePath(QStringLiteral("linked"));
+            const auto target = invalid == QStringLiteral("linked-file") ? path : dir.path();
+            const DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+                | (invalid == QStringLiteral("linked-parent") ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0);
+            if (!CreateSymbolicLinkW(reinterpret_cast<LPCWSTR>(link.utf16()),
+                                     reinterpret_cast<LPCWSTR>(target.utf16()), flags))
+                QSKIP("创建符号链接需要 Windows 开发者模式或相应权限");
+            unsafe = invalid == QStringLiteral("linked-file") ? link : QDir(link).filePath(QStringLiteral("favorites.json"));
+        }
+        QVERIFY(!BookListCache::loadFavorites(unsafe, loaded).isEmpty());
+        QVERIFY(!BookListCache::saveFavorites(unsafe, {}).isEmpty());
+        QCOMPARE(readFile(path), original);
+        QCOMPARE(loaded.first().id, book.id);
+        return;
+    }
+    if (invalid == QStringLiteral("id"))
+        changed.first().id = QStringLiteral("not-an-id");
+    else if (invalid == QStringLiteral("duplicate")) {
+        changed.append(book);
+        changed.last().id = book.id.toUpper();
+    } else if (invalid == QStringLiteral("blank-name"))
+        changed.first().name = QStringLiteral("   ");
+    else if (invalid == QStringLiteral("control-name"))
+        changed.first().name = QStringLiteral("不允许\n换行");
+    else if (invalid == QStringLiteral("long-author"))
+        changed.first().author = QString(257, QLatin1Char('a'));
+    else if (invalid == QStringLiteral("long-description"))
+        changed.first().description = QString(65537, QLatin1Char('a'));
+    else if (invalid == QStringLiteral("count"))
+        changed = QVector<NovelSearchBook>(10001, book);
+    else if (invalid == QStringLiteral("total-size")) {
+        changed.clear();
+        auto large = book;
+        large.description = QString(65536, QLatin1Char('a'));
+        for (int index = 0; index < 513; ++index) {
+            large.id = QStringLiteral("%1").arg(index, 32, 16, QLatin1Char('0'));
+            changed.append(large);
+        }
+    }
+    QVERIFY(!BookListCache::saveFavorites(path, changed).isEmpty());
+    QCOMPARE(readFile(path), original);
+    if (invalid != QStringLiteral("count") && invalid != QStringLiteral("total-size")) {
+        auto object = QJsonDocument::fromJson(original).object();
+        auto entries = object.value(QStringLiteral("books")).toArray();
+        auto item = entries.first().toObject();
+        item.insert(QStringLiteral("id"), changed.first().id);
+        item.insert(QStringLiteral("name"), changed.first().name);
+        item.insert(QStringLiteral("author"), changed.first().author);
+        item.insert(QStringLiteral("description"), changed.first().description);
+        entries[0] = item;
+        if (invalid == QStringLiteral("duplicate"))
+            entries.append(item);
+        object.insert(QStringLiteral("books"), entries);
+        QVERIFY(writeFile(path, QJsonDocument(object).toJson()));
+        QVERIFY(!BookListCache::loadFavorites(path, loaded).isEmpty());
+        QCOMPARE(loaded.size(), 1);
+        QCOMPARE(loaded.first().id, book.id);
+    }
+}
+
+void MainWindowTest::preservesFavoritesWhenSaveFails_data()
+{
+    QTest::addColumn<bool>("locked");
+    QTest::newRow("corrupt-file") << false;
+    QTest::newRow("locked-file") << true;
+}
+
+void MainWindowTest::preservesFavoritesWhenSaveFails()
+{
+    QFETCH(bool, locked);
+    const auto restore = preserveFavoriteFile();
+    const auto path = BookListCache::favoritesPath();
+    QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath()));
+    QVERIFY(writeFile(path, "{\"version\":1,\"books\":[]}"));
+    const auto first = favoriteSample();
+    const auto second = favoriteSample(QLatin1Char('b'));
+    QVERIFY(BookListCache::saveFavorites(path, {first}).isEmpty());
+    BookDownloadController controller;
+    QSignalSpy changes(&controller, &BookDownloadController::favoritesChanged);
+    QSignalSpy busy(&controller, &BookDownloadController::busyChanged);
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    const auto unlock = qScopeGuard([&] {
+        if (handle != INVALID_HANDLE_VALUE)
+            CloseHandle(handle);
+    });
+    if (locked) {
+        handle = CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()), GENERIC_READ, FILE_SHARE_READ,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY(handle != INVALID_HANDLE_VALUE);
+    } else {
+        QVERIFY(writeFile(path, "{broken-protected-favorites"));
+    }
+    const auto previous = readFile(path);
+    QVERIFY(!controller.setFavorite(first, false).isEmpty());
+    QVERIFY(!controller.setFavorite(second, true).isEmpty());
+    QCOMPARE(controller.favorites().size(), 1);
+    QVERIFY(controller.isFavorite(first.id));
+    QVERIFY(!controller.isFavorite(second.id));
+    QCOMPARE(changes.count(), 0);
+    QCOMPARE(busy.count(), 0);
+    QCOMPARE(readFile(path), previous);
+    if (!locked) {
+        BookDownloadController restarted;
+        QVERIFY(!restarted.favoritesError().isEmpty());
+        QVERIFY(!restarted.setFavorite(second, true).isEmpty());
+        QVERIFY(restarted.favorites().isEmpty());
+        QCOMPARE(readFile(path), previous);
+    }
+}
+
+void MainWindowTest::favoritesSurviveCategoryAndSessionChanges()
+{
+    const auto restoreFavorites = preserveFavoriteFile();
+    const auto first = NovelCategory::defaultCategory();
+    auto second = first;
+    second.name = QStringLiteral("收藏无关的分类");
+    second.tagId = QStringLiteral("906");
+    const auto restoreCategories = preserveCategoryFiles({first, second});
+    const auto config = BookListCache::categoriesPath();
+    QVERIFY(BookListCache::saveCategories(config, {first, second}).isEmpty());
+    const auto path = BookListCache::favoritesPath();
+    QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath()));
+    QVERIFY(writeFile(path, "{\"version\":1,\"books\":[]}"));
+    BookDownloadController controller;
+    const auto book = favoriteSample();
+    const auto recent = favoriteSample(QLatin1Char('b'));
+    QSignalSpy changes(&controller, &BookDownloadController::favoritesChanged);
+    QSignalSpy busy(&controller, &BookDownloadController::busyChanged);
+    QVERIFY(controller.setFavorite(book, true).isEmpty());
+    QVERIFY(controller.setFavorite(recent, true).isEmpty());
+    auto duplicate = book;
+    duplicate.id = duplicate.id.toUpper();
+    QVERIFY(controller.setFavorite(duplicate, true).isEmpty());
+    QCOMPARE(controller.favorites().size(), 2);
+    QCOMPARE(controller.favorites().first().id, recent.id);
+    QCOMPARE(changes.count(), 2);
+    const auto saved = readFile(path);
+    QVERIFY(controller.removeCategory(first.key()).isEmpty());
+    controller.invalidate({});
+    const auto sessionPath = SessionStore::defaultPath();
+    const bool sessionExisted = QFile::exists(sessionPath);
+    const auto previousSession = readFile(sessionPath);
+    const auto restoreSession = qScopeGuard([&] {
+        if (sessionExisted)
+            writeFile(sessionPath, previousSession);
+        else
+            QFile::remove(sessionPath);
+    });
+    auto *api = controller.findChild<NovelApi *>();
+    QVERIFY(api);
+    SessionProfile profile;
+    profile.deviceId = QStringLiteral("synthetic-favorite-device");
+    profile.token = QStringLiteral("synthetic-favorite-token_123");
+    profile.headers = {{"version", "4.0.9"}, {"devicetype", "android"}, {"user-agent", "Test/1"}};
+    QVERIFY(api->restoreSession(profile).isEmpty());
+    controller.forgetSession();
+    QVERIFY(!controller.hasSession());
+    QCOMPARE(controller.favorites().size(), 2);
+    QCOMPARE(readFile(path), saved);
+    BookDownloadController restarted;
+    QCOMPARE(restarted.favorites().size(), 2);
+    QCOMPARE(restarted.favorites().first().id, recent.id);
+    QCOMPARE(restarted.favorites().last().description, book.description);
+    auto invalid = favoriteSample(QLatin1Char('c'));
+    invalid.name = QStringLiteral("\n");
+    QVERIFY(!controller.setFavorite(invalid, true).isEmpty());
+    QCOMPARE(readFile(path), saved);
+    QVERIFY(controller.setFavorite(duplicate, false).isEmpty());
+    QCOMPARE(controller.favorites().size(), 1);
+    QCOMPARE(controller.favorites().first().id, recent.id);
+    QCOMPARE(changes.count(), 3);
+    QCOMPARE(busy.count(), 0);
+}
+
+void MainWindowTest::reordersCategoriesWithoutDiscardingCache()
+{
+    const auto first = NovelCategory::defaultCategory();
+    auto second = first;
+    second.tagId = QStringLiteral("907");
+    second.name = QStringLiteral("第二分类");
+    auto third = first;
+    third.tagId = QStringLiteral("908");
+    third.name = QStringLiteral("第三分类");
+    const auto restore = preserveCategoryFiles({first, second, third});
+    const auto config = BookListCache::categoriesPath();
+    QVERIFY(BookListCache::saveCategories(config, {first, second, third}).isEmpty());
+    BookListSnapshot snapshot;
+    snapshot.page = 4;
+    snapshot.hasMore = true;
+    snapshot.updatedAt = QDateTime::currentDateTimeUtc();
+    snapshot.books.append(favoriteSample());
+    const auto cache = BookListCache::defaultPath(second);
+    QVERIFY(BookListCache::save(cache, snapshot, second).isEmpty());
+    const auto cachedBytes = readFile(cache);
+    BookDownloadController controller;
+    QVERIFY(controller.selectCategory(second.key()).isEmpty());
+    QSignalSpy changes(&controller, &BookDownloadController::categoriesChanged);
+    QSignalSpy results(&controller, &BookDownloadController::searchResultsChanged);
+    QSignalSpy busy(&controller, &BookDownloadController::busyChanged);
+    const auto original = readFile(config);
+    for (const auto &keys : QVector<QStringList>{{}, {first.key()}, {first.key(), first.key(), third.key()},
+                                                {first.key(), second.key(), QStringLiteral("missing")}}) {
+        QVERIFY(!controller.reorderCategories(keys).isEmpty());
+        QCOMPARE(readFile(config), original);
+        QCOMPARE(controller.categories().first().key(), first.key());
+    }
+    QVERIFY(controller.reorderCategories({third.key(), first.key(), second.key()}).isEmpty());
+    QCOMPARE(controller.categories().first().key(), third.key());
+    QCOMPARE(controller.currentCategory().key(), second.key());
+    QCOMPARE(controller.searchPage(), 4);
+    QVERIFY(controller.canLoadMoreSearch());
+    QVERIFY(!controller.searchComplete());
+    QCOMPARE(controller.listUpdatedAt(), snapshot.updatedAt);
+    QCOMPARE(controller.searchResults().first().id, snapshot.books.first().id);
+    QCOMPARE(readFile(cache), cachedBytes);
+    QCOMPARE(results.count(), 0);
+    QCOMPARE(busy.count(), 0);
+    QCOMPARE(changes.count(), 1);
+    const auto saved = readFile(config);
+    QVERIFY(controller.reorderCategories({third.key(), first.key(), second.key()}).isEmpty());
+    QCOMPARE(readFile(config), saved);
+    QCOMPARE(changes.count(), 1);
+    BookDownloadController restarted;
+    QCOMPARE(restarted.categories().first().key(), third.key());
+    QCOMPARE(restarted.categories().last().key(), second.key());
+    QVERIFY(writeFile(config, "{broken-order-config"));
+    QVERIFY(!controller.reorderCategories({first.key(), second.key(), third.key()}).isEmpty());
+    QCOMPARE(readFile(config), QByteArray("{broken-order-config"));
+    QCOMPARE(controller.categories().first().key(), third.key());
+    QCOMPARE(controller.currentCategory().key(), second.key());
+    QCOMPARE(changes.count(), 1);
+}
+
+void MainWindowTest::categoryOrderDialogSavesOnlyWhenAccepted()
+{
+    const auto first = NovelCategory::defaultCategory();
+    auto second = first;
+    second.tagId = QStringLiteral("909");
+    second.name = QStringLiteral("<b>可排序分类</b>");
+    const auto restore = preserveCategoryFiles({first, second});
+    const auto config = BookListCache::categoriesPath();
+    QVERIFY(BookListCache::saveCategories(config, {first}).isEmpty());
+    BookListSnapshot snapshot;
+    snapshot.page = 2;
+    snapshot.complete = true;
+    snapshot.updatedAt = QDateTime::currentDateTimeUtc();
+    snapshot.books.append(favoriteSample());
+    QVERIFY(BookListCache::save(BookListCache::defaultPath(first), snapshot, first).isEmpty());
+    MainWindow window;
+    auto *controller = window.findChild<BookDownloadController *>();
+    auto *sort = window.findChild<QPushButton *>(QStringLiteral("reorderCategoriesButton"));
+    auto *combo = window.findChild<QComboBox *>(QStringLiteral("bookCategoryCombo"));
+    auto *table = window.findChild<QTableWidget *>(QStringLiteral("bookSearchResultsTable"));
+    auto *filter = window.findChild<QLineEdit *>(QStringLiteral("bookResultFilterEdit"));
+    QVERIFY(controller && sort && combo && table && filter);
+    QVERIFY(!sort->isEnabled());
+    QVERIFY(controller->addCategory(second).isEmpty());
+    combo->setCurrentIndex(combo->findData(first.key()));
+    table->selectRow(0);
+    filter->setText(snapshot.books.first().name);
+    QVERIFY(sort->isEnabled());
+    const auto original = readFile(config);
+    QSignalSpy busy(controller, &BookDownloadController::busyChanged);
+    QTimer::singleShot(0, &window, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *list = dialog->findChild<QListWidget *>(QStringLiteral("categoryOrderList"));
+        auto *down = dialog->findChild<QPushButton *>(QStringLiteral("moveCategoryDownButton"));
+        QVERIFY(list && down);
+        QCOMPARE(list->dragDropMode(), QAbstractItemView::InternalMove);
+        down->click();
+        dialog->reject();
+    });
+    sort->click();
+    QCOMPARE(readFile(config), original);
+    QCOMPARE(combo->currentData().toString(), first.key());
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *list = dialog->findChild<QListWidget *>(QStringLiteral("categoryOrderList"));
+        auto *up = dialog->findChild<QPushButton *>(QStringLiteral("moveCategoryUpButton"));
+        auto *buttons = dialog->findChild<QDialogButtonBox *>();
+        QVERIFY(list && up && buttons);
+        list->setCurrentRow(1);
+        up->click();
+        QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), second.key());
+        buttons->button(QDialogButtonBox::Save)->click();
+    });
+    sort->click();
+    QCOMPARE(combo->itemData(0).toString(), second.key());
+    QCOMPARE(combo->currentData().toString(), first.key());
+    QCOMPARE(filter->text(), snapshot.books.first().name);
+    QCOMPARE(table->selectedItems().size(), 6);
+    QCOMPARE(controller->searchPage(), 2);
+    QCOMPARE(busy.count(), 0);
+}
+
+void MainWindowTest::favoritesWorkAcrossLibraryAndSavedPage()
+{
+    const auto restoreFavorites = preserveFavoriteFile();
+    const auto favoritePath = BookListCache::favoritesPath();
+    QVERIFY(QDir().mkpath(QFileInfo(favoritePath).absolutePath()));
+    QVERIFY(writeFile(favoritePath, "{\"version\":1,\"books\":[]}"));
+    const auto first = NovelCategory::defaultCategory();
+    auto second = first;
+    second.tagId = QStringLiteral("910");
+    second.name = QStringLiteral("没有书籍的分类");
+    const auto restoreCategories = preserveCategoryFiles({first, second});
+    QVERIFY(BookListCache::saveCategories(BookListCache::categoriesPath(), {first, second}).isEmpty());
+    BookListSnapshot snapshot;
+    snapshot.page = 1;
+    snapshot.complete = true;
+    snapshot.updatedAt = QDateTime::currentDateTimeUtc();
+    const auto book = favoriteSample();
+    snapshot.books.append(book);
+    QVERIFY(BookListCache::save(BookListCache::defaultPath(first), snapshot, first).isEmpty());
+    const auto cacheBefore = readFile(BookListCache::defaultPath(first));
+    MainWindow window;
+    auto *controller = window.findChild<BookDownloadController *>();
+    auto *table = window.findChild<QTableWidget *>(QStringLiteral("bookSearchResultsTable"));
+    auto *savedTable = window.findChild<QTableWidget *>(QStringLiteral("bookFavoritesTable"));
+    auto *favorites = window.findChild<QPushButton *>(QStringLiteral("favoritesNavigationButton"));
+    auto *pages = window.findChild<QStackedWidget *>(QStringLiteral("bookWorkspaceStack"));
+    auto *title = window.findChild<QLabel *>(QStringLiteral("favoriteSelectedTitleLabel"));
+    auto *description = window.findChild<QPlainTextEdit *>(QStringLiteral("favoriteSelectedDescriptionView"));
+    auto *filter = window.findChild<QLineEdit *>(QStringLiteral("favoritesFilterEdit"));
+    auto *summary = window.findChild<QLabel *>(QStringLiteral("favoritesSummaryLabel"));
+    auto *preview = window.findChild<QPushButton *>(QStringLiteral("favoriteDetailsButton"));
+    auto *open = window.findChild<QPushButton *>(QStringLiteral("openFavoriteDownloadButton"));
+    auto *remove = window.findChild<QPushButton *>(QStringLiteral("removeFavoriteButton"));
+    auto *id = window.findChild<QLineEdit *>(QStringLiteral("bookIdEdit"));
+    QVERIFY(controller && table && savedTable && favorites && pages && title && description && filter
+            && summary && preview && open && remove && id);
+    QSignalSpy busy(controller, &BookDownloadController::busyChanged);
+    QCOMPARE(table->columnCount(), 6);
+    QCOMPARE(table->horizontalHeader()->visualIndex(5), 0);
+    QCOMPARE(table->item(0, 5)->checkState(), Qt::Unchecked);
+    QVERIFY(summary->text().contains(QStringLiteral("还没有收藏")));
+    table->selectRow(0);
+    table->item(0, 5)->setCheckState(Qt::Checked);
+    QVERIFY(controller->isFavorite(book.id));
+    QCOMPARE(savedTable->rowCount(), 1);
+    QCOMPARE(table->selectedItems().size(), 6);
+    auto another = favoriteSample(QLatin1Char('b'));
+    QVERIFY(controller->setFavorite(another, true).isEmpty());
+    QVERIFY(controller->setFavorite(another, false).isEmpty());
+    QCOMPARE(table->item(0, 5)->checkState(), Qt::Checked);
+    QVERIFY(controller->selectCategory(second.key()).isEmpty());
+    favorites->click();
+    QCOMPARE(pages->currentIndex(), 3);
+    savedTable->selectRow(0);
+    QCOMPARE(title->textFormat(), Qt::PlainText);
+    QCOMPARE(title->text(), book.name);
+    QCOMPARE(description->toPlainText(), book.description);
+    filter->setText(QStringLiteral("不匹配的书名"));
+    QVERIFY(savedTable->isRowHidden(0));
+    QVERIFY(!open->isEnabled());
+    QVERIFY(description->toPlainText().isEmpty());
+    filter->clear();
+    savedTable->selectRow(0);
+    QVERIFY(open->isEnabled());
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<BookDetailDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *text = dialog->findChild<QPlainTextEdit *>(QStringLiteral("bookDescriptionView"));
+        QVERIFY(text);
+        QCOMPARE(text->toPlainText(), book.description);
+        dialog->reject();
+    });
+    preview->click();
+    id->setText(QString(32, QLatin1Char('f')));
+    open->click();
+    QCOMPARE(pages->currentIndex(), 1);
+    QCOMPARE(id->text(), book.id);
+    favorites->click();
+    remove->click();
+    QVERIFY(!controller->isFavorite(book.id));
+    QCOMPARE(savedTable->rowCount(), 0);
+    QVERIFY(summary->text().contains(QStringLiteral("还没有收藏")));
+    QVERIFY(!remove->isEnabled());
+    QVERIFY(controller->selectCategory(first.key()).isEmpty());
+    QCOMPARE(table->item(0, 5)->checkState(), Qt::Unchecked);
+    QCOMPARE(readFile(BookListCache::defaultPath(first)), cacheBefore);
+    QCOMPARE(window.findChildren<BookDownloadController *>().size(), 1);
+    QCOMPARE(busy.count(), 0);
+    BookDownloadController restarted;
+    QVERIFY(restarted.favorites().isEmpty());
+}
+
+void MainWindowTest::favoriteMarkerRollsBackWhenSaveFails()
+{
+    const auto restoreFavorites = preserveFavoriteFile();
+    const auto path = BookListCache::favoritesPath();
+    QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath()));
+    QVERIFY(writeFile(path, "{broken-marker-file"));
+    const auto category = NovelCategory::defaultCategory();
+    const auto restore = preserveCategoryFiles({category});
+    QVERIFY(BookListCache::saveCategories(BookListCache::categoriesPath(), {category}).isEmpty());
+    BookListSnapshot snapshot;
+    snapshot.page = 1;
+    snapshot.complete = true;
+    snapshot.updatedAt = QDateTime::currentDateTimeUtc();
+    snapshot.books.append(favoriteSample());
+    QVERIFY(BookListCache::save(BookListCache::defaultPath(category), snapshot, category).isEmpty());
+    MainWindow window;
+    auto *controller = window.findChild<BookDownloadController *>();
+    auto *table = window.findChild<QTableWidget *>(QStringLiteral("bookSearchResultsTable"));
+    auto *summary = window.findChild<QLabel *>(QStringLiteral("favoritesSummaryLabel"));
+    auto *status = window.findChild<QLabel *>(QStringLiteral("bookTaskStatusLabel"));
+    QVERIFY(controller && table && summary && status);
+    QVERIFY(!controller->favoritesError().isEmpty());
+    QVERIFY(summary->text().contains(QStringLiteral("原文件已保留")));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    table->selectRow(0);
+    auto *marker = table->item(0, 5);
+    table->scrollToItem(marker);
+    QStyleOptionViewItem option;
+    option.initFrom(table->viewport());
+    option.rect = table->visualItemRect(marker);
+    option.features = QStyleOptionViewItem::HasCheckIndicator;
+    option.checkState = Qt::Unchecked;
+    const auto indicator = table->style()->subElementRect(QStyle::SE_ItemViewItemCheckIndicator, &option, table);
+    QVERIFY(indicator.isValid());
+    QSignalSpy clicks(table, &QTableWidget::itemClicked);
+    QTest::mouseClick(table->viewport(), Qt::LeftButton, Qt::NoModifier, indicator.center());
+    QCOMPARE(clicks.count(), 1);
+    QCOMPARE(table->item(0, 5)->checkState(), Qt::Unchecked);
+    QVERIFY(controller->favorites().isEmpty());
+    QVERIFY(status->text().contains(QStringLiteral("修复")));
+    QCOMPARE(readFile(path), QByteArray("{broken-marker-file"));
+}
+
+void MainWindowTest::favoriteControllersMergeCurrentDiskState()
+{
+    const auto restore = preserveFavoriteFile();
+    const auto path = BookListCache::favoritesPath();
+    QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath()));
+    QVERIFY(writeFile(path, "{\"version\":1,\"books\":[]}"));
+    BookDownloadController firstWindow;
+    BookDownloadController secondWindow;
+    const auto first = favoriteSample();
+    const auto second = favoriteSample(QLatin1Char('b'));
+    const auto third = favoriteSample(QLatin1Char('c'));
+    QVERIFY(firstWindow.setFavorite(first, true).isEmpty());
+    QVERIFY(secondWindow.setFavorite(second, true).isEmpty());
+    QCOMPARE(secondWindow.favorites().size(), 2);
+    QCOMPARE(secondWindow.favorites().first().id, second.id);
+    QVERIFY(secondWindow.isFavorite(first.id));
+    QVERIFY(firstWindow.setFavorite(third, true).isEmpty());
+    QCOMPARE(firstWindow.favorites().size(), 3);
+    QVERIFY(firstWindow.isFavorite(second.id));
+    QVERIFY(secondWindow.setFavorite(first, false).isEmpty());
+    QCOMPARE(secondWindow.favorites().size(), 2);
+    QVERIFY(secondWindow.isFavorite(third.id));
+    QVERIFY(!secondWindow.isFavorite(first.id));
+    QVERIFY(firstWindow.setFavorite(second, false).isEmpty());
+    QCOMPARE(firstWindow.favorites().size(), 1);
+    QCOMPARE(firstWindow.favorites().first().id, third.id);
+    BookDownloadController restarted;
+    QCOMPARE(restarted.favorites().size(), 1);
+    QCOMPARE(restarted.favorites().first().id, third.id);
+}
+
+void MainWindowTest::favoriteUpdateRespectsAnotherWriterLock()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const auto path = dir.filePath(QStringLiteral("favorites.json"));
+    const auto first = favoriteSample();
+    const auto second = favoriteSample(QLatin1Char('b'));
+    QVERIFY(BookListCache::saveFavorites(path, {first}).isEmpty());
+    const auto previous = readFile(path);
+    QLockFile lock(path + QStringLiteral(".lock"));
+    QVERIFY(lock.tryLock(0));
+    QVector<NovelSearchBook> books{first};
+    QVERIFY(!BookListCache::updateFavorite(path, second, true, books).isEmpty());
+    QVERIFY(!BookListCache::saveFavorites(path, {}).isEmpty());
+    QCOMPARE(books.size(), 1);
+    QCOMPARE(books.first().id, first.id);
+    QCOMPARE(readFile(path), previous);
+    lock.unlock();
+    QVERIFY(BookListCache::updateFavorite(path, second, true, books).isEmpty());
+    QCOMPARE(books.size(), 2);
+    QCOMPARE(books.first().id, second.id);
+    QCOMPARE(books.last().id, first.id);
 }
 
 int main(int argc, char **argv)

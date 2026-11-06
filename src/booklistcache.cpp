@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLockFile>
 #include <QSaveFile>
 #include <QSet>
 #include <QStandardPaths>
@@ -39,6 +40,34 @@ bool validText(const QJsonValue &value, qsizetype maximum, bool multiline = fals
         return ch.isNull() || (ch.category() == QChar::Other_Control
             && !(multiline && (ch == QLatin1Char('\n') || ch == QLatin1Char('\r') || ch == QLatin1Char('\t'))));
     });
+}
+
+QJsonObject bookObject(const NovelSearchBook &book)
+{
+    return {{QStringLiteral("id"), book.id}, {QStringLiteral("name"), book.name},
+            {QStringLiteral("author"), book.author}, {QStringLiteral("chapter_count"), book.chapterCount},
+            {QStringLiteral("status"), book.status}, {QStringLiteral("description"), book.description}};
+}
+
+bool readBook(const QJsonValue &entry, NovelSearchBook &book)
+{
+    if (!entry.isObject())
+        return false;
+    const auto item = entry.toObject();
+    book.id = item.value(QStringLiteral("id")).toString().toLower();
+    book.name = item.value(QStringLiteral("name")).toString();
+    if (!NovelApi::isId(book.id) || book.name.isEmpty()
+        || !validText(item.value(QStringLiteral("name")), 256)
+        || !validText(item.value(QStringLiteral("author")), 256)
+        || !validText(item.value(QStringLiteral("chapter_count")), 256)
+        || !validText(item.value(QStringLiteral("status")), 256)
+        || !validText(item.value(QStringLiteral("description")), 65536, true))
+        return false;
+    book.author = item.value(QStringLiteral("author")).toString();
+    book.chapterCount = item.value(QStringLiteral("chapter_count")).toString();
+    book.status = item.value(QStringLiteral("status")).toString();
+    book.description = item.value(QStringLiteral("description")).toString();
+    return true;
 }
 }
 
@@ -94,24 +123,10 @@ QString BookListCache::load(const QString &path, BookListSnapshot &snapshot, con
         return QStringLiteral("列表缓存超过 100000 本限制，未使用缓存。");
     QSet<QString> ids;
     for (const auto &entry : books) {
-        if (!entry.isObject())
-            return QStringLiteral("列表缓存包含无效书籍记录。");
-        const auto item = entry.toObject();
         NovelSearchBook book;
-        book.id = item.value(QStringLiteral("id")).toString().toLower();
-        book.name = item.value(QStringLiteral("name")).toString();
-        if (!NovelApi::isId(book.id) || ids.contains(book.id) || book.name.isEmpty()
-            || !validText(item.value(QStringLiteral("name")), 256)
-            || !validText(item.value(QStringLiteral("author")), 256)
-            || !validText(item.value(QStringLiteral("chapter_count")), 256)
-            || !validText(item.value(QStringLiteral("status")), 256)
-            || !validText(item.value(QStringLiteral("description")), 65536, true))
+        if (!readBook(entry, book) || ids.contains(book.id))
             return QStringLiteral("列表缓存的书籍资料无效，请刷新分组。");
         ids.insert(book.id);
-        book.author = item.value(QStringLiteral("author")).toString();
-        book.chapterCount = item.value(QStringLiteral("chapter_count")).toString();
-        book.status = item.value(QStringLiteral("status")).toString();
-        book.description = item.value(QStringLiteral("description")).toString();
         loaded.books.append(book);
     }
     snapshot = std::move(loaded);
@@ -127,12 +142,8 @@ QString BookListCache::save(const QString &path, const BookListSnapshot &snapsho
     if (!safeLocation(path) || !QDir().mkpath(info.absolutePath()) || !safeLocation(path))
         return QStringLiteral("无法创建安全的列表缓存位置；内存结果仍保留。");
     QJsonArray books;
-    for (const auto &book : snapshot.books) {
-        books.append(QJsonObject{
-            {QStringLiteral("id"), book.id}, {QStringLiteral("name"), book.name},
-            {QStringLiteral("author"), book.author}, {QStringLiteral("chapter_count"), book.chapterCount},
-            {QStringLiteral("status"), book.status}, {QStringLiteral("description"), book.description}});
-    }
+    for (const auto &book : snapshot.books)
+        books.append(bookObject(book));
     const QJsonObject object{
         {QStringLiteral("version"), 2}, {QStringLiteral("app_version"), QStringLiteral("4.0.9")},
         {QStringLiteral("tag_id"), category.tagId}, {QStringLiteral("filters"), category.parameters()},
@@ -220,5 +231,139 @@ QString BookListCache::saveCategories(const QString &path, const QVector<NovelCa
     file.setDirectWriteFallback(false);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("保存分类配置失败，未保存分类配置。");
+    return {};
+}
+
+QString BookListCache::favoritesPath()
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+        .filePath(QStringLiteral("favorites-v1.json"));
+}
+
+QString BookListCache::loadFavorites(const QString &path, QVector<NovelSearchBook> &books)
+{
+    if (!safeLocation(path))
+        return QStringLiteral("收藏文件位置不安全，未读取。");
+    if (!QFileInfo::exists(path)) {
+        books.clear();
+        return {};
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size() <= 0 || file.size() > MaxCacheSize)
+        return QStringLiteral("收藏文件不可读或超过 32 MiB，未读取。");
+    const auto bytes = file.read(MaxCacheSize + 1);
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(bytes, &error);
+    const auto object = document.object();
+    if (file.error() != QFileDevice::NoError || bytes.size() > MaxCacheSize
+        || error.error != QJsonParseError::NoError || !document.isObject()
+        || object.value(QStringLiteral("version")).toDouble(-1) != 1
+        || !object.value(QStringLiteral("books")).isArray())
+        return QStringLiteral("收藏文件格式不正确，原文件已保留。");
+    const auto entries = object.value(QStringLiteral("books")).toArray();
+    if (entries.size() > 10000)
+        return QStringLiteral("收藏超过 10000 本限制，未读取。");
+    QVector<NovelSearchBook> loaded;
+    QSet<QString> ids;
+    for (const auto &entry : entries) {
+        NovelSearchBook book;
+        if (!readBook(entry, book) || book.name.trimmed().isEmpty() || ids.contains(book.id))
+            return QStringLiteral("收藏文件含无效或重复书籍，原文件已保留。");
+        ids.insert(book.id);
+        loaded.append(book);
+    }
+    books = std::move(loaded);
+    return {};
+}
+
+namespace {
+QString lockFavorites(const QString &path, QLockFile &lock)
+{
+    const auto lockPath = path + QStringLiteral(".lock");
+    if (!safeLocation(path) || !safeLocation(lockPath)
+        || !QDir().mkpath(QFileInfo(path).absolutePath()) || !safeLocation(path) || !safeLocation(lockPath))
+        return QStringLiteral("无法创建安全的收藏文件位置，未保存。");
+    if (!lock.tryLock(0))
+        return QStringLiteral("收藏文件正被其他窗口使用或无法锁定，请稍后重试；原收藏未修改。");
+    return {};
+}
+
+QString writeFavorites(const QString &path, const QVector<NovelSearchBook> &books)
+{
+    if (books.size() > 10000)
+        return QStringLiteral("最多收藏 10000 本书籍，未保存。");
+    QJsonArray entries;
+    QSet<QString> ids;
+    qint64 metadataSize = 0;
+    for (const auto &book : books) {
+        NovelSearchBook normalized;
+        const auto item = bookObject(book);
+        if (!readBook(item, normalized) || normalized.name.trimmed().isEmpty() || ids.contains(normalized.id))
+            return QStringLiteral("书籍资料无效或重复，未保存收藏。");
+        metadataSize += normalized.id.size() + normalized.name.size() + normalized.author.size()
+            + normalized.chapterCount.size() + normalized.status.size() + normalized.description.size();
+        if (metadataSize > MaxCacheSize)
+            return QStringLiteral("收藏资料超过 32 MiB，未保存。");
+        ids.insert(normalized.id);
+        entries.append(bookObject(normalized));
+    }
+    const auto bytes = QJsonDocument(QJsonObject{
+        {QStringLiteral("version"), 1}, {QStringLiteral("books"), entries}}).toJson(QJsonDocument::Compact);
+    if (bytes.size() > MaxCacheSize)
+        return QStringLiteral("收藏资料超过 32 MiB，未保存。");
+    if (!safeLocation(path))
+        return QStringLiteral("无法创建安全的收藏文件位置，未保存。");
+    QSaveFile file(path);
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+        return QStringLiteral("保存收藏失败，原收藏未修改。");
+    return {};
+}
+}
+
+QString BookListCache::saveFavorites(const QString &path, const QVector<NovelSearchBook> &books)
+{
+    QLockFile lock(path + QStringLiteral(".lock"));
+    const auto error = lockFavorites(path, lock);
+    if (!error.isEmpty())
+        return error;
+    QVector<NovelSearchBook> existing;
+    const auto loadError = loadFavorites(path, existing);
+    if (!loadError.isEmpty())
+        return loadError + QStringLiteral("请先备份并修复收藏文件，再修改收藏。");
+    return writeFavorites(path, books);
+}
+
+QString BookListCache::updateFavorite(const QString &path, const NovelSearchBook &book, bool favorite,
+                                    QVector<NovelSearchBook> &books)
+{
+    if (!NovelApi::isId(book.id))
+        return QStringLiteral("书籍 ID 无效，未修改收藏。");
+    QLockFile lock(path + QStringLiteral(".lock"));
+    auto error = lockFavorites(path, lock);
+    if (!error.isEmpty())
+        return error;
+    QVector<NovelSearchBook> updated;
+    error = loadFavorites(path, updated);
+    if (!error.isEmpty())
+        return error + QStringLiteral("请先备份并修复收藏文件，再修改收藏。");
+    const auto id = book.id.toLower();
+    const auto found = std::find_if(updated.cbegin(), updated.cend(), [&id](const NovelSearchBook &item) {
+        return item.id == id;
+    });
+    if (favorite && found == updated.cend()) {
+        auto savedBook = book;
+        savedBook.id = id;
+        updated.prepend(savedBook);
+    } else if (!favorite && found != updated.cend()) {
+        updated.removeAt(found - updated.cbegin());
+    } else {
+        books = std::move(updated);
+        return {};
+    }
+    error = writeFavorites(path, updated);
+    if (!error.isEmpty())
+        return error;
+    books = std::move(updated);
     return {};
 }

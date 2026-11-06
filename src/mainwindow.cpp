@@ -2,11 +2,14 @@
 #include "novdecoder.h"
 #include "chapterdownload.h"
 #include "bookdownloadwidget.h"
+#include "workbenchtheme.h"
 
+#include <QButtonGroup>
 #include <QComboBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -16,7 +19,8 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QStandardPaths>
-#include <QTabWidget>
+#include <QScrollArea>
+#include <QStackedWidget>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -24,110 +28,178 @@
 
 MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
 {
-    setWindowTitle(QStringLiteral("NOV 下载与解码工具"));
-    resize(1100, 820);
-    setMinimumSize(820, 680);
+    setWindowTitle(QStringLiteral("NovDecoder · NOV 下载与解码工具"));
+    setObjectName(QStringLiteral("workbenchWindow"));
+    setStyleSheet(WorkbenchTheme::styleSheet());
+    resize(1240, 840);
+    setMinimumSize(980, 700);
 
-    auto *outer = new QVBoxLayout(this);
-    tabs = new QTabWidget(this);
-    auto *singlePage = new QWidget(tabs);
-    tabs->addTab(singlePage, QStringLiteral("单章转换"));
-    bookWidget = new BookDownloadWidget(tabs);
-    tabs->addTab(bookWidget, QStringLiteral("整书下载"));
-    outer->addWidget(tabs);
+    auto *outer = new QHBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    auto *sidebar = new QWidget(this);
+    sidebar->setObjectName(QStringLiteral("workbenchSidebar"));
+    sidebar->setFixedWidth(188);
+    auto *sideLayout = new QVBoxLayout(sidebar);
+    sideLayout->setContentsMargins(14, 28, 14, 20);
+    sideLayout->setSpacing(8);
+    auto *brand = new QHBoxLayout;
+    auto *logo = new QLabel(sidebar);
+    logo->setPixmap(WorkbenchTheme::icon(WorkbenchTheme::Symbol::Book).pixmap(30, 30));
+    brand->addWidget(logo);
+    brand->addWidget(WorkbenchTheme::label(QStringLiteral("NovDecoder"), "brand", sidebar));
+    sideLayout->addLayout(brand);
+    sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("让文字，留在身边"), "muted", sidebar));
+    sideLayout->addSpacing(26);
+    sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("工作空间"), "muted", sidebar));
+    navigation = new QButtonGroup(this);
+    navigation->setExclusive(true);
+    const QStringList titles{QStringLiteral("小说书库"), QStringLiteral("我的收藏"), QStringLiteral("整书下载"),
+        QStringLiteral("单章转换"), QStringLiteral("会话与连接")};
+    const QStringList names{QStringLiteral("libraryNavigationButton"), QStringLiteral("favoritesNavigationButton"),
+        QStringLiteral("downloadNavigationButton"), QStringLiteral("convertNavigationButton"), QStringLiteral("sessionNavigationButton")};
+    const WorkbenchTheme::Symbol symbols[]{WorkbenchTheme::Symbol::Library, WorkbenchTheme::Symbol::Favorite,
+        WorkbenchTheme::Symbol::Download, WorkbenchTheme::Symbol::Convert, WorkbenchTheme::Symbol::Connection};
+    const int pageIds[]{0, 4, 1, 2, 3};
+    for (int index = 0; index < titles.size(); ++index) {
+        if (pageIds[index] == 3) {
+            sideLayout->addSpacing(20);
+            sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("连接与配置"), "muted", sidebar));
+        }
+        auto *button = new QPushButton(WorkbenchTheme::icon(symbols[index]), titles[index], sidebar);
+        button->setObjectName(names[index]);
+        button->setProperty("nav", true);
+        button->setCheckable(true);
+        button->setIconSize(QSize(18, 18));
+        navigation->addButton(button, pageIds[index]);
+        sideLayout->addWidget(button);
+    }
+    sideLayout->addStretch();
+    sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("本地处理 · 按需联网\n适配 App 4.0.9"), "muted", sidebar));
+    outer->addWidget(sidebar);
+
+    auto *workarea = new QWidget(this);
+    auto *workLayout = new QVBoxLayout(workarea);
+    workLayout->setContentsMargins(0, 0, 0, 0);
+    workLayout->setSpacing(0);
+    auto *toolbar = new QFrame(workarea);
+    toolbar->setObjectName(QStringLiteral("workbenchToolbar"));
+    auto *toolbarLayout = new QHBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(24, 14, 24, 14);
+    breadcrumb = WorkbenchTheme::label({}, "muted", toolbar);
+    toolbarLayout->addWidget(breadcrumb, 1);
+    toolbarLayout->addWidget(WorkbenchTheme::label(QStringLiteral("本地配置受当前 Windows 用户保护"), "muted", toolbar));
+    workLayout->addWidget(toolbar);
+    workspace = new QStackedWidget(workarea);
+    workspace->setObjectName(QStringLiteral("workspaceStack"));
+    bookWidget = new BookDownloadWidget(workspace);
+    workspace->addWidget(bookWidget);
+    auto *singlePage = new QWidget(workspace);
+    singlePage->setProperty("pageSurface", true);
     auto *layout = new QVBoxLayout(singlePage);
     layout->setContentsMargins(24, 24, 24, 24);
     layout->setSpacing(16);
-
-    auto *title = new QLabel(QStringLiteral("NOV → TXT"), this);
-    auto titleFont = title->font();
-    titleFont.setPointSize(20);
-    titleFont.setBold(true);
-    title->setFont(titleFont);
-    layout->addWidget(title);
-
-    auto *description = new QLabel(
-        QStringLiteral("选择本地章节文件，或粘贴单个章节下载链接，自动转换为 UTF-8 TXT。\n"
-                       "仅支持当前已验证的章节格式；本地文件不会上传，源文件不会修改。"), this);
-    description->setWordWrap(true);
-    layout->addWidget(description);
-
-    pathsWidget = new QWidget(this);
+    layout->addWidget(WorkbenchTheme::label(QStringLiteral("SIMPLE, LOCAL, YOURS / 单章转换"), "eyebrow", singlePage));
+    layout->addWidget(WorkbenchTheme::label(QStringLiteral("一章文字，一份轻巧的 TXT"), "pageTitle", singlePage));
+    layout->addWidget(WorkbenchTheme::label(QStringLiteral("本地章节转换或单章链接下载，校验后保存为 UTF-8 TXT。源文件不会修改。"), "muted", singlePage));
+    auto *columns = new QHBoxLayout;
+    columns->setSpacing(16);
+    auto *formCard = WorkbenchTheme::panel(singlePage);
+    auto *formLayout = new QVBoxLayout(formCard);
+    formLayout->setContentsMargins(22, 22, 22, 22);
+    formLayout->setSpacing(16);
+    formLayout->addWidget(WorkbenchTheme::label(QStringLiteral("转换工作台"), "sectionTitle", formCard));
+    pathsWidget = new QWidget(formCard);
     auto *paths = new QGridLayout(pathsWidget);
     paths->setContentsMargins(0, 0, 0, 0);
-    paths->setHorizontalSpacing(12);
-    paths->setVerticalSpacing(12);
-    inputMode = new QComboBox(this);
+    paths->setHorizontalSpacing(10);
+    paths->setVerticalSpacing(10);
+    inputMode = new QComboBox(pathsWidget);
     inputMode->setObjectName("inputMode");
     inputMode->addItems({QStringLiteral("本地文件"), QStringLiteral("链接下载")});
-    inputPathEdit = new QLineEdit(this);
+    paths->addWidget(WorkbenchTheme::label(QStringLiteral("01 / 选择来源"), "muted", pathsWidget), 0, 0, 1, 2);
+    paths->addWidget(inputMode, 1, 0, 1, 2);
+    auto *inputLabel = WorkbenchTheme::label(QStringLiteral("输入文件"), "muted", pathsWidget);
+    paths->addWidget(inputLabel, 2, 0, 1, 2);
+    inputPathEdit = new QLineEdit(pathsWidget);
     inputPathEdit->setObjectName("inputPathEdit");
     inputPathEdit->setPlaceholderText(QStringLiteral("选择 .nov 或 response.bin 文件"));
     inputPathEdit->setClearButtonEnabled(true);
-    downloadUrlEdit = new QLineEdit(this);
+    auto *inputButton = new QPushButton(QStringLiteral("选择文件…"), pathsWidget);
+    inputButton->setObjectName("chooseInputButton");
+    paths->addWidget(inputPathEdit, 3, 0);
+    paths->addWidget(inputButton, 3, 1);
+    downloadUrlEdit = new QLineEdit(pathsWidget);
     downloadUrlEdit->setObjectName("downloadUrlEdit");
-    downloadUrlEdit->setPlaceholderText(QStringLiteral("粘贴完整的 http:// 或 https:// 章节下载链接（含签名参数）"));
+    downloadUrlEdit->setPlaceholderText(QStringLiteral("完整 HTTP(S) 章节链接，保留签名参数"));
     downloadUrlEdit->setClearButtonEnabled(true);
     downloadUrlEdit->setVisible(false);
-    outputPathEdit = new QLineEdit(this);
+    paths->addWidget(downloadUrlEdit, 3, 0, 1, 2);
+    paths->addWidget(WorkbenchTheme::label(QStringLiteral("02 / 输出 TXT"), "muted", pathsWidget), 4, 0, 1, 2);
+    outputPathEdit = new QLineEdit(pathsWidget);
     outputPathEdit->setObjectName("outputPathEdit");
-    outputPathEdit->setPlaceholderText(QStringLiteral("解码后的 TXT 保存位置"));
+    outputPathEdit->setPlaceholderText(QStringLiteral("选择 TXT 保存位置"));
     outputPathEdit->setClearButtonEnabled(true);
-    auto *inputButton = new QPushButton(QStringLiteral("选择文件…"), this);
-    inputButton->setObjectName("chooseInputButton");
-    auto *outputButton = new QPushButton(QStringLiteral("保存位置…"), this);
+    auto *outputButton = new QPushButton(QStringLiteral("保存位置…"), pathsWidget);
     outputButton->setObjectName("chooseOutputButton");
-    auto *inputLabel = new QLabel(QStringLiteral("输入文件"), this);
-    paths->addWidget(new QLabel(QStringLiteral("输入方式"), this), 0, 0);
-    paths->addWidget(inputMode, 0, 1, 1, 2);
-    paths->addWidget(inputLabel, 1, 0);
-    paths->addWidget(inputPathEdit, 1, 1);
-    paths->addWidget(inputButton, 1, 2);
-    paths->addWidget(downloadUrlEdit, 1, 1, 1, 2);
-    paths->addWidget(new QLabel(QStringLiteral("输出 TXT"), this), 2, 0);
-    paths->addWidget(outputPathEdit, 2, 1);
-    paths->addWidget(outputButton, 2, 2);
-    keyEdit = new QLineEdit(this);
+    paths->addWidget(outputPathEdit, 5, 0);
+    paths->addWidget(outputButton, 5, 1);
+    paths->addWidget(WorkbenchTheme::label(QStringLiteral("03 / 本次解码密钥"), "muted", pathsWidget), 6, 0, 1, 2);
+    keyEdit = new QLineEdit(pathsWidget);
     keyEdit->setObjectName("keyEdit");
     keyEdit->setEchoMode(QLineEdit::Password);
     keyEdit->setMaxLength(16);
-    keyEdit->setPlaceholderText(QStringLiteral("输入 16 个可打印 ASCII 字符；仅本次运行有效，不保存或上传"));
+    keyEdit->setPlaceholderText(QStringLiteral("16 个可打印 ASCII 字符，不保存或上传"));
     keyEdit->setClearButtonEnabled(true);
-    paths->addWidget(new QLabel(QStringLiteral("解码密钥"), this), 3, 0);
-    paths->addWidget(keyEdit, 3, 1, 1, 2);
-    paths->setColumnStretch(1, 1);
-    layout->addWidget(pathsWidget);
-
+    paths->addWidget(keyEdit, 7, 0, 1, 2);
+    paths->setColumnStretch(0, 1);
+    formLayout->addWidget(pathsWidget);
+    formLayout->addWidget(WorkbenchTheme::label(QStringLiteral("仅支持当前已验证的章节格式，单文件上限 32 MiB。本地文件不会上传。"), "muted", formCard));
     auto *actions = new QHBoxLayout;
     actions->addStretch();
-    cancelButton = new QPushButton(QStringLiteral("取消下载"), this);
+    cancelButton = new QPushButton(QStringLiteral("取消下载"), formCard);
     cancelButton->setObjectName("cancelDownloadButton");
-    cancelButton->setMinimumHeight(38);
     cancelButton->setVisible(false);
     actions->addWidget(cancelButton);
-    decodeButton = new QPushButton(QStringLiteral("解密并保存 TXT"), this);
+    decodeButton = new QPushButton(QStringLiteral("解密并保存 TXT"), formCard);
     decodeButton->setObjectName("decodeButton");
-    decodeButton->setMinimumHeight(38);
+    decodeButton->setProperty("primary", true);
     decodeButton->setEnabled(false);
     actions->addWidget(decodeButton);
-    layout->addLayout(actions);
-
-    downloadProgress = new QProgressBar(this);
+    formLayout->addLayout(actions);
+    downloadProgress = new QProgressBar(formCard);
     downloadProgress->setObjectName("downloadProgress");
     downloadProgress->setVisible(false);
-    layout->addWidget(downloadProgress);
-    statusLabel = new QLabel(QStringLiteral("等待选择文件或输入链接。单文件上限 32 MiB。"), this);
+    formLayout->addWidget(downloadProgress);
+    statusLabel = WorkbenchTheme::label(QStringLiteral("等待选择文件或输入链接。单文件上限 32 MiB。"), "status", formCard);
     statusLabel->setObjectName("statusLabel");
-    statusLabel->setTextFormat(Qt::PlainText);
-    statusLabel->setWordWrap(true);
     statusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(statusLabel);
-    layout->addStretch();
-
-    auto *notice = new QLabel(
-        QStringLiteral("仅下载和处理你有权保存的单章内容，不绕过账号或阅读权限。签名链接过期时请重新获取。"), this);
-    notice->setWordWrap(true);
-    layout->addWidget(notice);
+    formLayout->addWidget(statusLabel);
+    formLayout->addStretch();
+    columns->addWidget(formCard, 3);
+    auto *guide = WorkbenchTheme::panel(singlePage);
+    guide->setMaximumWidth(270);
+    auto *guideLayout = new QVBoxLayout(guide);
+    guideLayout->setContentsMargins(20, 22, 20, 22);
+    guideLayout->setSpacing(14);
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("三个清晰的步骤"), "sectionTitle", guide));
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("01 / 选择来源"), "eyebrow", guide));
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("本地章节资源，或你有权使用的单章链接。"), "muted", guide));
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("02 / 设置输出"), "eyebrow", guide));
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("指定 TXT 保存位置。已有文件需确认覆盖，源文件保持不变。"), "muted", guide));
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("03 / 转换与保存"), "eyebrow", guide));
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("使用本次密钥校验并转换；出错时不会发布不完整 TXT。"), "muted", guide));
+    guideLayout->addStretch();
+    guideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("整本书的目录查询和合并，请使用“整书下载”。"), "muted", guide));
+    columns->addWidget(guide, 1);
+    layout->addLayout(columns, 1);
+    layout->addWidget(WorkbenchTheme::label(QStringLiteral("仅处理你有权保存的内容，不绕过账号或阅读权限。签名链接过期时请重新获取。"), "notice", singlePage));
+    auto *singleScroll = new QScrollArea(workspace);
+    singleScroll->setWidgetResizable(true);
+    singleScroll->setWidget(singlePage);
+    workspace->addWidget(singleScroll);
+    workLayout->addWidget(workspace, 1);
+    outer->addWidget(workarea, 1);
 
     downloader = new ChapterDownload(this);
     connect(downloader, &ChapterDownload::progress, this, [this](qint64 received, qint64 total) {
@@ -143,7 +215,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
         cancelButton->setVisible(false);
         downloadProgress->setVisible(false);
         pathsWidget->setEnabled(true);
-        tabs->setTabEnabled(1, true);
+        setBookNavigationEnabled(true);
         if (success)
             reportSaved(outputPathEdit->text(), bytes, characters);
         else
@@ -151,7 +223,11 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
         updateAction();
     });
     connect(bookWidget, &BookDownloadWidget::busyChanged, this, [this](bool busy) {
-        tabs->setTabEnabled(0, !busy);
+        navigation->button(2)->setEnabled(!busy);
+    });
+    connect(navigation, &QButtonGroup::idClicked, this, &MainWindow::setWorkspacePage);
+    connect(bookWidget, &BookDownloadWidget::downloadPageRequested, this, [this] {
+        setWorkspacePage(1);
     });
     connect(inputButton, &QPushButton::clicked, this, &MainWindow::chooseInput);
     connect(outputButton, &QPushButton::clicked, this, &MainWindow::chooseOutput);
@@ -174,9 +250,33 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
         cancelButton->setEnabled(false);
         downloader->cancel();
     });
+    setWorkspacePage(0);
 }
 
 MainWindow::~MainWindow() = default;
+
+void MainWindow::setWorkspacePage(int index)
+{
+    auto *button = navigation->button(index);
+    if (!button || !button->isEnabled())
+        return;
+    button->setChecked(true);
+    if (index == 2) {
+        workspace->setCurrentIndex(1);
+    } else {
+        workspace->setCurrentIndex(0);
+        bookWidget->setPage(index == 0 ? BookDownloadWidget::Page::Library
+            : index == 4 ? BookDownloadWidget::Page::Favorites
+            : index == 1 ? BookDownloadWidget::Page::Download : BookDownloadWidget::Page::Session);
+    }
+    breadcrumb->setText(QStringLiteral("工作空间  /  %1").arg(button->text()));
+}
+
+void MainWindow::setBookNavigationEnabled(bool enabled)
+{
+    for (const auto index : {0, 4, 1, 3})
+        navigation->button(index)->setEnabled(enabled);
+}
 
 void MainWindow::chooseInput()
 {
@@ -291,7 +391,7 @@ void MainWindow::reportSaved(const QString &outputPath, qint64 bytes, qsizetype 
 void MainWindow::startDownload(const QUrl &url, const QString &outputPath, bool allowOverwrite)
 {
     pathsWidget->setEnabled(false);
-    tabs->setTabEnabled(1, false);
+    setBookNavigationEnabled(false);
     decodeButton->setEnabled(false);
     cancelButton->setEnabled(true);
     cancelButton->setVisible(true);

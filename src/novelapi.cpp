@@ -40,7 +40,8 @@ bool descriptionText(const QJsonValue &value)
 qint64 chapterNumber(const QString &title)
 {
     static const QRegularExpression expression(
-        QStringLiteral("^第\\s*([0-9]+|[零〇一二两三四五六七八九十百千万]+)"));
+        QStringLiteral("第\\s*([0-9]+|[零〇一二两三四五六七八九十百千万]+)"
+                       "(?:\\s*-\\s*(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+))?\\s*[章节回]"));
     const auto match = expression.match(title.trimmed());
     if (!match.hasMatch())
         return -1;

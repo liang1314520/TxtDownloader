@@ -21,4 +21,9 @@ QString save(const QString &path, const BookListSnapshot &snapshot,
 QString categoriesPath();
 QString loadCategories(const QString &path, QVector<NovelCategory> &categories);
 QString saveCategories(const QString &path, const QVector<NovelCategory> &categories);
+QString favoritesPath();
+QString loadFavorites(const QString &path, QVector<NovelSearchBook> &books);
+QString saveFavorites(const QString &path, const QVector<NovelSearchBook> &books);
+QString updateFavorite(const QString &path, const NovelSearchBook &book, bool favorite,
+                       QVector<NovelSearchBook> &books);
 }

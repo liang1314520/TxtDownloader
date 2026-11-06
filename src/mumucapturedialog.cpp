@@ -1,5 +1,6 @@
 #include "mumucapturedialog.h"
 #include "mumucapture.h"
+#include "workbenchtheme.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -8,21 +9,44 @@
 #include <QFileDialog>
 #include <QSignalBlocker>
 #include <QFileInfo>
+#include <QFrame>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
 MuMuCaptureDialog::MuMuCaptureDialog(QWidget *parent, bool captureCategory)
     : QDialog(parent), capture(new MuMuCapture(this)), categoryOnly(captureCategory)
 {
-    setWindowTitle(categoryOnly ? QStringLiteral("MuMu 采集添加分类") : QStringLiteral("MuMu 自动采集会话"));
-    resize(780, 520);
+    setWindowTitle(categoryOnly ? QStringLiteral("MuMu 采集添加分类") : QStringLiteral("MuMu 采集工作台"));
+    setStyleSheet(WorkbenchTheme::styleSheet());
+    resize(860, 820);
+    setMinimumSize(680, 620);
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(24, 24, 24, 20);
+    layout->setSpacing(14);
+    layout->addWidget(WorkbenchTheme::label(QStringLiteral("LOCAL CONNECTION / 本机连接"), "eyebrow", this));
+    layout->addWidget(WorkbenchTheme::label(categoryOnly ? QStringLiteral("采集并添加小说分类") : QStringLiteral("MuMu 采集工作台"), "pageTitle", this));
+    auto *steps = new QHBoxLayout;
+    for (const auto &text : {QStringLiteral("01 / 选择实例"), QStringLiteral("02 / 授权采集"), QStringLiteral("03 / 恢复完成")}) {
+        auto *step = WorkbenchTheme::panel(this);
+        auto *stepLayout = new QVBoxLayout(step);
+        stepLayout->setContentsMargins(14, 12, 14, 12);
+        stepLayout->addWidget(WorkbenchTheme::label(text, "eyebrow", step));
+        steps->addWidget(step);
+    }
+    layout->addLayout(steps);
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    auto *body = new QWidget(scroll);
+    auto *bodyLayout = new QVBoxLayout(body);
+    bodyLayout->setContentsMargins(0, 0, 0, 0);
+    bodyLayout->setSpacing(14);
     auto *notice = new QLabel(QStringLiteral(
         "仅支持 MuMu 自带的网卡记录功能，不使用 Android 代理，不安装证书、不修改 APK。\n"
         "请先手动启动目标 MuMu 实例并打开自己的 App，关闭模拟器内其他应用。\n"
@@ -32,15 +56,17 @@ MuMuCaptureDialog::MuMuCaptureDialog(QWidget *parent, bool captureCategory)
         "异常退出、恢复或删除失败可能留下敏感文件；临时目录中的 recovery.json 记录原设置，必须按提示人工处理。"), this);
     notice->setTextFormat(Qt::PlainText);
     notice->setWordWrap(true);
-    layout->addWidget(notice);
+    notice->setProperty("role", "notice");
+    bodyLayout->addWidget(notice);
     if (categoryOnly) {
-        auto *help = new QLabel(QStringLiteral("开始后，请在 App 中打开目标小说分类；已打开时需刷新或重新进入。只识别带分类条件的列表请求，随后由你填写名称确认添加，不会自动加载书库。"), this);
-        help->setTextFormat(Qt::PlainText);
-        help->setWordWrap(true);
-        layout->addWidget(help);
+        auto *help = WorkbenchTheme::label(QStringLiteral("先进入源 App 的小说页面。开始采集后，点击你要添加的分类标签；标签命中缓存时可能没有新请求。只识别带分类条件的列表请求，随后由你确认条件并填写名称；不会自动遍历分类或加载书库。"), "status", body);
+        bodyLayout->addWidget(help);
     }
-    options = new QWidget(this);
+    options = WorkbenchTheme::panel(body);
     auto *form = new QFormLayout(options);
+    form->setContentsMargins(18, 18, 18, 18);
+    form->setSpacing(12);
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     instances = new QComboBox(options);
     instances->setObjectName(QStringLiteral("mumuCaptureInstanceCombo"));
     auto *detect = new QPushButton(QStringLiteral("重新检测"), options);
@@ -73,10 +99,14 @@ MuMuCaptureDialog::MuMuCaptureDialog(QWidget *parent, bool captureCategory)
     consent = new QCheckBox(QStringLiteral("我确认这是自己的实例，并同意本次短暂记录其全网卡流量及临时文件风险"), options);
     consent->setObjectName(QStringLiteral("mumuCaptureConsentCheck"));
     form->addRow(consent);
-    layout->addWidget(options);
+    bodyLayout->addWidget(options);
+    bodyLayout->addStretch();
+    scroll->setWidget(body);
+    layout->addWidget(scroll, 1);
     auto *actions = new QHBoxLayout;
     startButton = new QPushButton(QStringLiteral("开始采集"), this);
     startButton->setObjectName(QStringLiteral("startMuMuCaptureButton"));
+    startButton->setProperty("primary", true);
     stopButton = new QPushButton(QStringLiteral("停止并恢复"), this);
     stopButton->setObjectName(QStringLiteral("stopMuMuCaptureButton"));
     closeButton = new QPushButton(QStringLiteral("关闭"), this);
@@ -88,9 +118,9 @@ MuMuCaptureDialog::MuMuCaptureDialog(QWidget *parent, bool captureCategory)
     status = new QLabel(QStringLiteral("未开始采集。选择 MuMu 工具与对应 .nemu 实例配置后，勾选授权并点击开始。"), this);
     status->setTextFormat(Qt::PlainText);
     status->setWordWrap(true);
+    status->setProperty("role", "status");
     status->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(status);
-    layout->addStretch();
     connect(chooseTool, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("选择 MuMu 自带的 VBoxManage.exe"),
             toolPath->text(), QStringLiteral("MuMu 管理工具 (VBoxManage.exe)"));

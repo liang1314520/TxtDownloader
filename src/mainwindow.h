@@ -7,7 +7,8 @@ class QLabel;
 class QLineEdit;
 class ChapterDownload;
 class BookDownloadWidget;
-class QTabWidget;
+class QButtonGroup;
+class QStackedWidget;
 class QProgressBar;
 class QPushButton;
 class QUrl;
@@ -20,6 +21,8 @@ public:
     ~MainWindow() override;
 
 private:
+    void setWorkspacePage(int index);
+    void setBookNavigationEnabled(bool enabled);
     void chooseInput();
     void chooseOutput();
     void updatePaths();
@@ -29,7 +32,9 @@ private:
     void startDownload(const QUrl &url, const QString &outputPath, bool allowOverwrite);
     void reportSaved(const QString &outputPath, qint64 bytes, qsizetype characters);
 
-    QTabWidget *tabs = nullptr;
+    QStackedWidget *workspace = nullptr;
+    QButtonGroup *navigation = nullptr;
+    QLabel *breadcrumb = nullptr;
     BookDownloadWidget *bookWidget = nullptr;
     QWidget *pathsWidget = nullptr;
     QComboBox *inputMode = nullptr;

@@ -51,6 +51,7 @@ BookDownloadController::BookDownloadController(QObject *parent)
 {
     cacheWarning = BookListCache::loadCategories(BookListCache::categoriesPath(), categoryList);
     category = categoryList.first();
+    favoriteWarning = BookListCache::loadFavorites(BookListCache::favoritesPath(), favoriteBooks);
     const auto listError = BookListCache::load(BookListCache::defaultPath(category), groupList(), category);
     if (!listError.isEmpty())
         cacheWarning += QStringLiteral("\n") + listError;
@@ -466,6 +467,64 @@ QString BookDownloadController::removeCategory(const QString &key)
     if (currentCategory)
         selectCategory(fallbackKey);
     emit categoriesChanged();
+    return {};
+}
+
+QString BookDownloadController::reorderCategories(const QStringList &keys)
+{
+    if (isBusy())
+        return QStringLiteral("请先结束当前任务，再调整分类顺序。");
+    if (keys.size() != categoryList.size())
+        return QStringLiteral("分类顺序必须包含全部现有分类，未保存。");
+    QVector<NovelCategory> updated;
+    QSet<QString> seen;
+    for (const auto &key : keys) {
+        const auto found = std::find_if(categoryList.cbegin(), categoryList.cend(), [&key](const NovelCategory &item) {
+            return item.key() == key;
+        });
+        if (found == categoryList.cend() || seen.contains(key))
+            return QStringLiteral("分类顺序包含重复或不存在的分类，未保存。");
+        seen.insert(key);
+        updated.append(*found);
+    }
+    const bool unchanged = std::equal(keys.cbegin(), keys.cend(), categoryList.cbegin(),
+        [](const QString &key, const NovelCategory &item) { return key == item.key(); });
+    if (unchanged)
+        return {};
+    const auto error = saveCategoryList(updated);
+    if (!error.isEmpty())
+        return error;
+    categoryList = std::move(updated);
+    emit categoriesChanged();
+    return {};
+}
+
+bool BookDownloadController::isFavorite(const QString &id) const
+{
+    return std::any_of(favoriteBooks.cbegin(), favoriteBooks.cend(), [&id](const NovelSearchBook &book) {
+        return book.id.compare(id, Qt::CaseInsensitive) == 0;
+    });
+}
+
+QString BookDownloadController::setFavorite(const NovelSearchBook &book, bool favorite)
+{
+    if (isBusy())
+        return QStringLiteral("请先结束当前任务，再修改收藏。");
+    QVector<NovelSearchBook> updated;
+    const auto error = BookListCache::updateFavorite(BookListCache::favoritesPath(), book, favorite, updated);
+    if (!error.isEmpty())
+        return error;
+    const bool changed = !favoriteWarning.isEmpty() || updated.size() != favoriteBooks.size()
+        || !std::equal(updated.cbegin(), updated.cend(), favoriteBooks.cbegin(),
+            [](const NovelSearchBook &left, const NovelSearchBook &right) {
+                return left.id == right.id && left.name == right.name && left.author == right.author
+                    && left.chapterCount == right.chapterCount && left.status == right.status
+                    && left.description == right.description;
+            });
+    favoriteBooks = std::move(updated);
+    favoriteWarning.clear();
+    if (changed)
+        emit favoritesChanged();
     return {};
 }
 

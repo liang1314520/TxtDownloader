@@ -3,6 +3,7 @@
 #include "booklistcache.h"
 
 #include <QObject>
+#include <QStringList>
 #include <QTimer>
 
 #include <memory>
@@ -43,6 +44,11 @@ public:
     QString addCategory(const NovelCategory &value);
     QString renameCategory(const QString &key, const QString &name);
     QString removeCategory(const QString &key);
+    QString reorderCategories(const QStringList &keys);
+    const QVector<NovelSearchBook> &favorites() const { return favoriteBooks; }
+    QString favoritesError() const { return favoriteWarning; }
+    bool isFavorite(const QString &id) const;
+    QString setFavorite(const NovelSearchBook &book, bool favorite);
     QDateTime listUpdatedAt() const { return activeList().updatedAt; }
     void invalidate(const QString &capturePath);
     void invalidateBook();
@@ -60,6 +66,7 @@ signals:
     void bookChanged(const NovelBook &book);
     void searchResultsChanged();
     void categoriesChanged();
+    void favoritesChanged();
     void previewCatalogReady(const NovelBook &book);
     void previewChapterReady(int index, const QString &text, const QString &status);
     void previewFinished(const QString &message);
@@ -104,6 +111,8 @@ private:
     NovelCategory category = NovelCategory::defaultCategory();
     QMap<QString, BookListSnapshot> groupLists;
     BookListSnapshot keywordList;
+    QVector<NovelSearchBook> favoriteBooks;
+    QString favoriteWarning;
     bool groupActive = true;
     QString searchKeywords;
     QString listCapturePath;
