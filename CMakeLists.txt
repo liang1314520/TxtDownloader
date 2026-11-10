@@ -40,14 +40,26 @@ target_include_directories(novdecoder_network PUBLIC src)
 target_compile_definitions(novdecoder_network PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(novdecoder_network PUBLIC novdecoder_core Qt6::Network PRIVATE crypt32)
 
+add_library(novdecoder_video STATIC
+    src/videoapitypes.cpp src/videoapitypes.h
+    src/videostore.cpp src/videostore.h
+    src/videocover.cpp src/videocover.h
+    src/videocatalogcontroller.cpp src/videocatalogcontroller.h
+    src/videoclient.cpp src/videoclient.h)
+target_include_directories(novdecoder_video PUBLIC src)
+target_compile_definitions(novdecoder_video PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(novdecoder_video PUBLIC Qt6::Core Qt6::Gui Qt6::Network PRIVATE bcrypt crypt32)
+
 add_library(novdecoder_widgets STATIC
     src/workbenchtheme.cpp src/workbenchtheme.h
     src/mainwindow.cpp src/mainwindow.h
     src/bookdownloadwidget.cpp src/bookdownloadwidget.h
     src/bookdetaildialog.cpp src/bookdetaildialog.h
-    src/mumucapturedialog.cpp src/mumucapturedialog.h)
+    src/mumucapturedialog.cpp src/mumucapturedialog.h
+    src/videolistmodel.cpp src/videolistmodel.h
+    src/videocatalogwidget.cpp src/videocatalogwidget.h)
 target_include_directories(novdecoder_widgets PUBLIC src)
-target_link_libraries(novdecoder_widgets PUBLIC novdecoder_network Qt6::Widgets)
+target_link_libraries(novdecoder_widgets PUBLIC novdecoder_network novdecoder_video Qt6::Widgets)
 
 qt_add_executable(NovDecoder WIN32 src/main.cpp)
 target_link_libraries(NovDecoder PRIVATE novdecoder_widgets)
@@ -63,4 +75,13 @@ if(BUILD_TESTING)
     qt_add_executable(tst_mainwindow tests/tst_mainwindow.cpp)
     target_link_libraries(tst_mainwindow PRIVATE novdecoder_widgets Qt6::Test)
     add_test(NAME mainwindow COMMAND tst_mainwindow -o -,txt)
+
+    qt_add_executable(tst_videoapi tests/tst_videoapi.cpp)
+    target_link_libraries(tst_videoapi PRIVATE novdecoder_video Qt6::Test bcrypt)
+    target_compile_definitions(tst_videoapi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME videoapi COMMAND tst_videoapi -o -,txt)
+
+    qt_add_executable(tst_videocatalog tests/tst_videocatalog.cpp)
+    target_link_libraries(tst_videocatalog PRIVATE novdecoder_widgets novdecoder_video Qt6::Test)
+    add_test(NAME videocatalog COMMAND tst_videocatalog -o -,txt)
 endif()

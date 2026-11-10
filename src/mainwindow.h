@@ -7,6 +7,7 @@ class QLabel;
 class QLineEdit;
 class ChapterDownload;
 class BookDownloadWidget;
+class VideoCatalogWidget;
 class QButtonGroup;
 class QStackedWidget;
 class QProgressBar;
@@ -21,6 +22,10 @@ public:
     ~MainWindow() override;
 
 private:
+    enum class Module { Novel, Video };
+    void setModule(Module module);
+    void setVideoPage(int index);
+    void updateModuleActivity();
     void setWorkspacePage(int index);
     void setBookNavigationEnabled(bool enabled);
     void chooseInput();
@@ -32,6 +37,15 @@ private:
     void startDownload(const QUrl &url, const QString &outputPath, bool allowOverwrite);
     void reportSaved(const QString &outputPath, qint64 bytes, qsizetype characters);
 
+    Module currentModule = Module::Novel;
+    int novelWorkspaceIndex = 0;
+    bool novelBusy = false;
+    bool videoBusy = false;
+    QButtonGroup *modules = nullptr;
+    QButtonGroup *videoNavigation = nullptr;
+    QWidget *novelNavigationPanel = nullptr;
+    QWidget *videoNavigationPanel = nullptr;
+    VideoCatalogWidget *videoWidget = nullptr;
     QStackedWidget *workspace = nullptr;
     QButtonGroup *navigation = nullptr;
     QLabel *breadcrumb = nullptr;

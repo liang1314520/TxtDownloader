@@ -2,6 +2,7 @@
 #include "novdecoder.h"
 #include "chapterdownload.h"
 #include "bookdownloadwidget.h"
+#include "videocatalogwidget.h"
 #include "workbenchtheme.h"
 
 #include <QButtonGroup>
@@ -50,8 +51,25 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
     brand->addWidget(WorkbenchTheme::label(QStringLiteral("NovDecoder"), "brand", sidebar));
     sideLayout->addLayout(brand);
     sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("让文字，留在身边"), "muted", sidebar));
-    sideLayout->addSpacing(26);
-    sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("工作空间"), "muted", sidebar));
+    sideLayout->addSpacing(20);
+    modules = new QButtonGroup(this);
+    modules->setExclusive(true);
+    auto *moduleLayout = new QHBoxLayout;
+    for (int index = 0; index < 2; ++index) {
+        auto *entry = new QPushButton(index == 0 ? QStringLiteral("小说") : QStringLiteral("视频"), sidebar);
+        entry->setObjectName(index == 0 ? QStringLiteral("novelModuleButton") : QStringLiteral("videoModuleButton"));
+        entry->setCheckable(true);
+        entry->setProperty("nav", true);
+        modules->addButton(entry, index);
+        moduleLayout->addWidget(entry);
+    }
+    sideLayout->addLayout(moduleLayout);
+    sideLayout->addSpacing(12);
+    novelNavigationPanel = new QWidget(sidebar);
+    auto *novelLayout = new QVBoxLayout(novelNavigationPanel);
+    novelLayout->setContentsMargins(0, 0, 0, 0);
+    novelLayout->setSpacing(8);
+    novelLayout->addWidget(WorkbenchTheme::label(QStringLiteral("小说工作空间"), "muted", novelNavigationPanel));
     navigation = new QButtonGroup(this);
     navigation->setExclusive(true);
     const QStringList titles{QStringLiteral("小说书库"), QStringLiteral("我的收藏"), QStringLiteral("整书下载"),
@@ -63,19 +81,40 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
     const int pageIds[]{0, 4, 1, 2, 3};
     for (int index = 0; index < titles.size(); ++index) {
         if (pageIds[index] == 3) {
-            sideLayout->addSpacing(20);
-            sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("连接与配置"), "muted", sidebar));
+            novelLayout->addSpacing(20);
+            novelLayout->addWidget(WorkbenchTheme::label(QStringLiteral("连接与配置"), "muted", novelNavigationPanel));
         }
-        auto *button = new QPushButton(WorkbenchTheme::icon(symbols[index]), titles[index], sidebar);
+        auto *button = new QPushButton(WorkbenchTheme::icon(symbols[index]), titles[index], novelNavigationPanel);
         button->setObjectName(names[index]);
         button->setProperty("nav", true);
         button->setCheckable(true);
         button->setIconSize(QSize(18, 18));
         navigation->addButton(button, pageIds[index]);
-        sideLayout->addWidget(button);
+        novelLayout->addWidget(button);
     }
+    sideLayout->addWidget(novelNavigationPanel);
+    videoNavigationPanel = new QWidget(sidebar);
+    auto *videoLayout = new QVBoxLayout(videoNavigationPanel);
+    videoLayout->setContentsMargins(0, 0, 0, 0);
+    videoLayout->setSpacing(8);
+    videoLayout->addWidget(WorkbenchTheme::label(QStringLiteral("视频工作空间"), "muted", videoNavigationPanel));
+    videoNavigation = new QButtonGroup(this);
+    videoNavigation->setExclusive(true);
+    const QStringList videoTitles{QStringLiteral("分类与搜索"), QStringLiteral("本机收藏"), QStringLiteral("会话与连接")};
+    const QStringList videoNames{QStringLiteral("videoCategoriesNavigationButton"), QStringLiteral("videoFavoritesNavigationButton"),
+        QStringLiteral("videoConnectionNavigationButton")};
+    for (int index = 0; index < videoTitles.size(); ++index) {
+        auto *entry = new QPushButton(videoTitles[index], videoNavigationPanel);
+        entry->setObjectName(videoNames[index]);
+        entry->setProperty("nav", true);
+        entry->setCheckable(true);
+        videoNavigation->addButton(entry, index);
+        videoLayout->addWidget(entry);
+    }
+    videoNavigation->button(0)->setChecked(true);
+    sideLayout->addWidget(videoNavigationPanel);
     sideLayout->addStretch();
-    sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("本地处理 · 按需联网\n适配 App 4.0.9"), "muted", sidebar));
+    sideLayout->addWidget(WorkbenchTheme::label(QStringLiteral("本地处理 · 按需联网\n小说 4.0.9 · 视频 1.0.7"), "muted", sidebar));
     outer->addWidget(sidebar);
 
     auto *workarea = new QWidget(this);
@@ -198,6 +237,8 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
     singleScroll->setWidgetResizable(true);
     singleScroll->setWidget(singlePage);
     workspace->addWidget(singleScroll);
+    videoWidget = new VideoCatalogWidget(workspace);
+    workspace->addWidget(videoWidget);
     workLayout->addWidget(workspace, 1);
     outer->addWidget(workarea, 1);
 
@@ -221,10 +262,19 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
         else
             statusLabel->setText(QStringLiteral("未保存：%1").arg(message));
         updateAction();
+        updateModuleActivity();
     });
     connect(bookWidget, &BookDownloadWidget::busyChanged, this, [this](bool busy) {
+        novelBusy = busy;
         navigation->button(2)->setEnabled(!busy);
+        updateModuleActivity();
     });
+    connect(videoWidget, &VideoCatalogWidget::busyChanged, this, [this](bool busy) {
+        videoBusy = busy;
+        updateModuleActivity();
+    });
+    connect(modules, &QButtonGroup::idClicked, this, [this](int index) { setModule(index == 0 ? Module::Novel : Module::Video); });
+    connect(videoNavigation, &QButtonGroup::idClicked, this, &MainWindow::setVideoPage);
     connect(navigation, &QButtonGroup::idClicked, this, &MainWindow::setWorkspacePage);
     connect(bookWidget, &BookDownloadWidget::downloadPageRequested, this, [this] {
         setWorkspacePage(1);
@@ -251,9 +301,40 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent)
         downloader->cancel();
     });
     setWorkspacePage(0);
+    setModule(Module::Novel);
 }
 
 MainWindow::~MainWindow() = default;
+
+void MainWindow::setModule(Module module)
+{
+    currentModule = module;
+    const bool novel = module == Module::Novel;
+    modules->button(novel ? 0 : 1)->setChecked(true);
+    novelNavigationPanel->setVisible(novel);
+    videoNavigationPanel->setVisible(!novel);
+    workspace->setCurrentIndex(novel ? novelWorkspaceIndex : 2);
+    const auto *entry = novel ? navigation->checkedButton() : videoNavigation->checkedButton();
+    breadcrumb->setText(QStringLiteral("%1工作空间  /  %2")
+        .arg(novel ? QStringLiteral("小说") : QStringLiteral("视频"), entry ? entry->text() : QString()));
+}
+
+void MainWindow::setVideoPage(int index)
+{
+    auto *entry = videoNavigation->button(index);
+    if (!entry)
+        return;
+    entry->setChecked(true);
+    videoWidget->setPage(static_cast<VideoCatalogWidget::Page>(index));
+    if (currentModule == Module::Video)
+        setModule(Module::Video);
+}
+
+void MainWindow::updateModuleActivity()
+{
+    modules->button(0)->setText(novelBusy || downloader->isBusy() ? QStringLiteral("小说 · 忙") : QStringLiteral("小说"));
+    modules->button(1)->setText(videoBusy ? QStringLiteral("视频 · 忙") : QStringLiteral("视频"));
+}
 
 void MainWindow::setWorkspacePage(int index)
 {
@@ -261,15 +342,14 @@ void MainWindow::setWorkspacePage(int index)
     if (!button || !button->isEnabled())
         return;
     button->setChecked(true);
-    if (index == 2) {
-        workspace->setCurrentIndex(1);
-    } else {
-        workspace->setCurrentIndex(0);
+    novelWorkspaceIndex = index == 2 ? 1 : 0;
+    if (index != 2) {
         bookWidget->setPage(index == 0 ? BookDownloadWidget::Page::Library
             : index == 4 ? BookDownloadWidget::Page::Favorites
             : index == 1 ? BookDownloadWidget::Page::Download : BookDownloadWidget::Page::Session);
     }
-    breadcrumb->setText(QStringLiteral("工作空间  /  %1").arg(button->text()));
+    if (currentModule == Module::Novel)
+        setModule(Module::Novel);
 }
 
 void MainWindow::setBookNavigationEnabled(bool enabled)
@@ -399,4 +479,5 @@ void MainWindow::startDownload(const QUrl &url, const QString &outputPath, bool 
     downloadProgress->setVisible(true);
     statusLabel->setText(QStringLiteral("正在下载章节资源…"));
     downloader->start(url, outputPath, keyEdit->text().toLatin1(), allowOverwrite);
+    updateModuleActivity();
 }

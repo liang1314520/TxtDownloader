@@ -2,6 +2,8 @@
 #include "booklistcache.h"
 #include "bookdownloadcontroller.h"
 #include "bookdownloadwidget.h"
+#include "videocatalogwidget.h"
+#include "videocatalogcontroller.h"
 #include "bookdetaildialog.h"
 #include "sessionprofile.h"
 #include "pcaprequestreader.h"
@@ -179,6 +181,8 @@ private slots:
     void preservesCategoriesWhenManagementCannotSave();
     void categoryManagementDialogsPreserveState();
     void navigatesWorkbenchWithoutStartingTasks();
+    void switchesModulesWithoutRebuildingNovelWorkspace();
+    void moduleSwitchingPreservesTaskExclusion();
     void selectedBookSidebarUsesPlainText();
     void workbenchNavigationPreservesTaskExclusion();
     void persistsFavoritesWithoutCredentials();
@@ -1762,6 +1766,72 @@ void MainWindowTest::navigatesWorkbenchWithoutStartingTasks()
     QCOMPARE(busy.count(), 0);
     QCOMPARE(bookChanges.count(), 0);
     QVERIFY(!controller->isBusy());
+}
+
+void MainWindowTest::switchesModulesWithoutRebuildingNovelWorkspace()
+{
+    MainWindow window;
+    auto *workspace = window.findChild<QStackedWidget *>("workspaceStack");
+    auto *novel = window.findChild<QPushButton *>("novelModuleButton");
+    auto *video = window.findChild<QPushButton *>("videoModuleButton");
+    auto *input = window.findChild<QLineEdit *>("inputPathEdit");
+    auto *convert = window.findChild<QPushButton *>("convertNavigationButton");
+    auto *favorites = window.findChild<QPushButton *>("videoFavoritesNavigationButton");
+    auto *pages = window.findChild<QStackedWidget *>("videoWorkspaceStack");
+    auto *controller = window.findChild<BookDownloadController *>();
+    auto *videoController = window.findChild<VideoCatalogController *>();
+    QVERIFY(workspace && novel && video && input && convert && favorites && pages && controller && videoController);
+    QSignalSpy busy(videoController, &VideoCatalogController::busyChanged);
+    QSignalSpy consent(videoController, &VideoCatalogController::consentRequired);
+    QCOMPARE(workspace->currentIndex(), 0);
+    QVERIFY(novel->isChecked());
+    input->setText(QStringLiteral("E:/synthetic/keep-input.nov"));
+    convert->click();
+    video->click();
+    QCOMPARE(workspace->currentIndex(), 2);
+    favorites->click();
+    QCOMPARE(pages->currentIndex(), 1);
+    novel->click();
+    QCOMPARE(workspace->currentIndex(), 1);
+    QCOMPARE(window.findChild<BookDownloadController *>(), controller);
+    QCOMPARE(window.findChildren<BookDownloadController *>().size(), 1);
+    QCOMPARE(input->text(), QStringLiteral("E:/synthetic/keep-input.nov"));
+    video->click();
+    QCOMPARE(pages->currentIndex(), 1);
+    QCOMPARE(busy.count(), 0);
+    QCOMPARE(consent.count(), 0);
+}
+
+void MainWindowTest::moduleSwitchingPreservesTaskExclusion()
+{
+    MainWindow window;
+    auto *workspace = window.findChild<QStackedWidget *>("workspaceStack");
+    auto *novel = window.findChild<QPushButton *>("novelModuleButton");
+    auto *video = window.findChild<QPushButton *>("videoModuleButton");
+    auto *convert = window.findChild<QPushButton *>("convertNavigationButton");
+    auto *library = window.findChild<QPushButton *>("libraryNavigationButton");
+    auto *bookWidget = window.findChild<BookDownloadWidget *>();
+    auto *videoWidget = window.findChild<VideoCatalogWidget *>();
+    QVERIFY(workspace && novel && video && convert && library && bookWidget && videoWidget);
+    QVERIFY(QMetaObject::invokeMethod(bookWidget, "busyChanged", Qt::DirectConnection, Q_ARG(bool, true)));
+    QVERIFY(!convert->isEnabled());
+    video->click();
+    QCOMPARE(workspace->currentIndex(), 2);
+    QVERIFY(QMetaObject::invokeMethod(bookWidget, "downloadPageRequested", Qt::DirectConnection));
+    QCOMPARE(workspace->currentIndex(), 2);
+    novel->click();
+    QCOMPARE(workspace->currentIndex(), 0);
+    QVERIFY(library->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(bookWidget, "busyChanged", Qt::DirectConnection, Q_ARG(bool, false)));
+    convert->click();
+    QCOMPARE(workspace->currentIndex(), 1);
+    library->setEnabled(false);
+    video->click();
+    QVERIFY(QMetaObject::invokeMethod(videoWidget, "busyChanged", Qt::DirectConnection, Q_ARG(bool, true)));
+    novel->click();
+    QCOMPARE(workspace->currentIndex(), 1);
+    QVERIFY(!library->isEnabled());
+    QVERIFY(convert->isEnabled());
 }
 
 void MainWindowTest::selectedBookSidebarUsesPlainText()
